@@ -14,7 +14,7 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
-          flutter-version: '3.19.0'
+          flutter-version: '3.41.9'
 
       - name: Get dependencies
         run: flutter pub get
@@ -24,9 +24,9 @@ jobs:
 
       - name: Prepare Artifact
         run: |
-          mkdir -p payload
-          mv build/ios/iphoneos/Runner.app payload/
-          zip -r Runner.zip payload
+          mkdir -p Payload
+          mv build/ios/iphoneos/Runner.app Payload/
+          zip -r Runner.zip Payload
 
       - name: Upload Runner
         uses: actions/upload-artifact@v4
