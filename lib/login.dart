@@ -13,6 +13,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'main.dart' show isFirebaseInitialized;
 import 'home.dart';
+import 'downloads.dart';
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
@@ -51,7 +52,7 @@ class _LoginPageState extends State<LoginPage> {
   @override
   void initState() {
     super.initState();
-    _fetchServerInfoFromFirebase();
+    _initializeConnection();
     _loadSavedConfig();
     _loadAppVersion();
     _requestInstallPermission();
@@ -67,6 +68,21 @@ class _LoginPageState extends State<LoginPage> {
     super.dispose();
   }
 
+  Future<void> _initializeConnection() async {
+    final prefs = await SharedPreferences.getInstance();
+    final manualIP = prefs.getString('server_ip');
+    
+    if (manualIP != null && manualIP.isNotEmpty) {
+      setState(() {
+        _serverIP = manualIP;
+        _serverPort = prefs.getString('server_port') ?? '8080';
+      });
+      _fetchServerMessage();
+    } else {
+      _fetchServerInfoFromFirebase();
+    }
+  }
+
   Future<void> _fetchServerInfoFromFirebase() async {
     try {
       if (isFirebaseInitialized) {
@@ -76,32 +92,13 @@ class _LoginPageState extends State<LoginPage> {
         if (snapshot.exists) {
           final data = snapshot.value as Map<dynamic, dynamic>;
           setState(() {
-            _serverIP = data['ip'].toString();
+            _serverIP = (data['privateIp'] ?? data['ip']).toString();
             _serverPort = data['port'].toString();
           });
           _fetchServerMessage();
         }
-      } else {
-        _loadServerInfoFromPreferences();
       }
-    } catch (e) {
-      _loadServerInfoFromPreferences();
-    }
-  }
-  
-  Future<void> _loadServerInfoFromPreferences() async {
-    final prefs = await SharedPreferences.getInstance();
-    final savedIP = prefs.getString('server_ip');
-    final savedPort = prefs.getString('server_port');
-    
-    if (savedIP != null && savedIP.isNotEmpty) {
-      setState(() {
-        _serverIP = savedIP;
-        if (savedPort != null && savedPort.isNotEmpty) {
-          _serverPort = savedPort;
-        }
-      });
-    }
+    } catch (e) {}
   }
 
   Future<void> _requestInstallPermission() async {
@@ -129,6 +126,7 @@ class _LoginPageState extends State<LoginPage> {
   }
 
   Future<void> _fetchServerMessage() async {
+    if (_serverIP.isEmpty) return;
     try {
       final url = Uri.parse('http://$_serverIP:$_serverPort/api/server-message');
       final response = await http.get(url).timeout(const Duration(seconds: 5));
@@ -270,16 +268,22 @@ class _LoginPageState extends State<LoginPage> {
   String get _authHeader => 'Basic ${base64Encode(utf8.encode('${_usernameController.text}:${_passwordController.text}'))}';
 
   Future<void> _testConnection() async {
-    if (_serverIP.isEmpty) return;
+    if (_serverIP.isEmpty) {
+      setState(() => _status = 'No Server IP configured');
+      return;
+    }
 
     setState(() {
       _isLoading = true;
-      _status = 'Connecting...';
+      _status = 'Connecting to $_serverIP...';
     });
 
     try {
       final url = Uri.parse('http://$_serverIP:$_serverPort/api/test');
-      final response = await http.get(url, headers: {'Authorization': _authHeader}).timeout(const Duration(seconds: 15));
+      final response = await http.get(url, headers: {
+        'Authorization': _authHeader,
+        'ngrok-skip-browser-warning': 'true'
+      }).timeout(const Duration(seconds: 15));
 
       if (response.statusCode == 200) {
         final prefs = await SharedPreferences.getInstance();
@@ -321,7 +325,7 @@ class _LoginPageState extends State<LoginPage> {
       }
     } catch (e) {
       setState(() {
-        _status = 'Failed to connect';
+        _status = 'Failed to connect: $e';
         _isLoading = false;
       });
     }
@@ -339,6 +343,7 @@ class _LoginPageState extends State<LoginPage> {
         content: TextField(
           controller: controller,
           decoration: const InputDecoration(hintText: "192.168.x.x"),
+          keyboardType: TextInputType.url,
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
@@ -348,6 +353,7 @@ class _LoginPageState extends State<LoginPage> {
               if (newIp.isNotEmpty) {
                 await prefs.setString('server_ip', newIp);
                 setState(() => _serverIP = newIp);
+                _fetchServerMessage();
               }
               Navigator.pop(context);
             },
@@ -361,7 +367,20 @@ class _LoginPageState extends State<LoginPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Palm Vibe')),
+      appBar: AppBar(
+        title: const Text('Palm Vibe'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.file_download),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const DownloadsScreen()),
+              );
+            },
+          ),
+        ],
+      ),
       body: Padding(
         padding: const EdgeInsets.all(16.0),
         child: SingleChildScrollView(
@@ -376,6 +395,12 @@ class _LoginPageState extends State<LoginPage> {
                   }
                 },
                 child: const Icon(Icons.connected_tv, size: 80, color: Colors.purple),
+              ),
+              const SizedBox(height: 20),
+              const Text(
+                'Login using your credentials provided by HamTech',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                textAlign: TextAlign.center,
               ),
               const SizedBox(height: 30),
               TextField(
@@ -405,7 +430,7 @@ class _LoginPageState extends State<LoginPage> {
                       child: const Text('Connect'),
                     ),
               const SizedBox(height: 20),
-              Text(_status, style: TextStyle(color: _isConnected ? Colors.green : Colors.red)),
+              Text(_status, style: TextStyle(color: _isConnected ? Colors.green : Colors.red), textAlign: TextAlign.center),
               if (_showServerMessage)
                 Container(
                   margin: const EdgeInsets.only(top: 20),

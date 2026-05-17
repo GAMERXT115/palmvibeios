@@ -1,12 +1,140 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
+import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:video_player/video_player.dart';
+import 'package:chewie/chewie.dart';
+import 'package:path/path.dart' as path;
 import 'package:http/http.dart' as http;
+import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+class VideoProgress {
+  final String videoUrl;
+  final String username;
+  final int position;
+  final int duration;
+  final DateTime lastUpdated;
+
+  VideoProgress({
+    required this.videoUrl,
+    required this.username,
+    required this.position,
+    required this.duration,
+    required this.lastUpdated,
+  });
+
+  Map<String, dynamic> toJson() {
+    return {
+      'videoUrl': videoUrl,
+      'username': username,
+      'position': position,
+      'duration': duration,
+      'lastUpdated': lastUpdated.toIso8601String(),
+    };
+  }
+
+  factory VideoProgress.fromJson(Map<String, dynamic> json) {
+    return VideoProgress(
+      videoUrl: json['videoUrl'],
+      username: json['username'],
+      position: json['position'],
+      duration: json['duration'],
+      lastUpdated: DateTime.parse(json['lastUpdated']),
+    );
+  }
+
+  double get percentageWatched {
+    if (duration <= 0) return 0;
+    return (position / duration).clamp(0.0, 1.0);
+  }
+}
+
+class VideoProgressManager {
+  static const String _prefsKey = 'video_progress';
+  
+  static Future<void> saveProgress(
+    String videoUrl, 
+    String username, 
+    int position, 
+    int duration,
+  ) async {
+    try {
+      if (position < 5000 || (duration - position < 10000)) {
+        return;
+      }
+      
+      final prefs = await SharedPreferences.getInstance();
+      final progress = VideoProgress(
+        videoUrl: videoUrl,
+        username: username,
+        position: position,
+        duration: duration,
+        lastUpdated: DateTime.now(),
+      );
+      
+      final Map<String, dynamic> allProgress = await _getAllProgress();
+      final String key = '$username:$videoUrl';
+      allProgress[key] = progress.toJson();
+      await prefs.setString(_prefsKey, jsonEncode(allProgress));
+    } catch (e) {}
+  }
+  
+  static Future<VideoProgress?> getProgress(String videoUrl, String username) async {
+    try {
+      final Map<String, dynamic> allProgress = await _getAllProgress();
+      final String key = '$username:$videoUrl';
+      if (allProgress.containsKey(key)) {
+        return VideoProgress.fromJson(allProgress[key]);
+      }
+      return null;
+    } catch (e) {
+      return null;
+    }
+  }
+  
+  static Future<Map<String, dynamic>> _getAllProgress() async {
+    final prefs = await SharedPreferences.getInstance();
+    final String? progressJson = prefs.getString(_prefsKey);
+    if (progressJson == null || progressJson.isEmpty) return {};
+    try {
+      return Map<String, dynamic>.from(jsonDecode(progressJson));
+    } catch (e) {
+      return {};
+    }
+  }
+
+  static Future<List<VideoProgress>> getUserProgress(String username) async {
+    try {
+      final Map<String, dynamic> allProgress = await _getAllProgress();
+      final List<VideoProgress> userProgress = [];
+      for (final entry in allProgress.entries) {
+        if (entry.key.startsWith('$username:')) {
+          userProgress.add(VideoProgress.fromJson(entry.value));
+        }
+      }
+      userProgress.sort((a, b) => b.lastUpdated.compareTo(a.lastUpdated));
+      return userProgress;
+    } catch (e) {
+      return [];
+    }
+  }
+}
+
+class SubtitleEntry {
+  final Duration start;
+  final Duration end;
+  final String text;
+  
+  SubtitleEntry({
+    required this.start,
+    required this.end,
+    required this.text,
+  });
+}
 
 class VideoPlayerScreen extends StatefulWidget {
   final String videoUrl;
@@ -36,8 +164,11 @@ class VideoPlayerScreen extends StatefulWidget {
   State<VideoPlayerScreen> createState() => _VideoPlayerScreenState();
 }
 
-class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
-  late VideoPlayerController _controller;
+class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProviderStateMixin {
+  VideoPlayerController? _videoPlayerController;
+  ChewieController? _chewieController;
+  bool _isLoading = true;
+  String _error = '';
   bool _showControls = true;
   Timer? _hideTimer;
   List<SubtitleEntry> _subtitles = [];
@@ -47,63 +178,223 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
   double _volumeBoost = 1.0;
   Color _subTextColor = Colors.white;
   Color _subBgColor = Colors.black.withOpacity(0.75);
+  bool _hasError = false;
+  String _errorMessage = '';
+  bool _showRewindIndicator = false;
+  bool _showForwardIndicator = false;
+  Timer? _indicatorTimer;
+  Timer? _subtitleTimer;
+  Timer? _progressSaveTimer;
+  double _scale = 1.0;
+  double _baseScale = 1.0;
+
+  late AnimationController _controlsAnimationController;
+  late Animation<double> _controlsOpacity;
+  late AnimationController _capsuleSlideController;
+  late Animation<Offset> _capsuleSlideAnimation;
+  late AnimationController _progressController;
+
+  bool _showNextEpisodeOverlay = false;
+  Timer? _nextEpisodeTimer;
+  bool _nextEpisodeCancelled = false;
 
   @override
   void initState() {
     super.initState();
+    WakelockPlus.enable();
     SystemChrome.setPreferredOrientations([
       DeviceOrientation.landscapeLeft,
       DeviceOrientation.landscapeRight,
     ]);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+
+    _controlsAnimationController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 300),
+    );
+    _controlsOpacity = Tween<double>(begin: 0.0, end: 1.0).animate(_controlsAnimationController);
+
+    _capsuleSlideController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 1),
+    );
+    _capsuleSlideAnimation = Tween<Offset>(
+      begin: const Offset(0, -2.0),
+      end: Offset.zero,
+    ).animate(CurvedAnimation(
+      parent: _capsuleSlideController,
+      curve: Curves.easeOutCubic,
+    ));
+
+    _progressController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 5),
+    );
+
     _initializePlayer();
   }
 
   Future<void> _initializePlayer() async {
-    final auth = 'Basic ${base64Encode(utf8.encode('${widget.username}:${widget.password}'))}';
-    _controller = VideoPlayerController.networkUrl(
-      Uri.parse('${widget.videoUrl}&auth=${auth.split(' ')[1]}'),
-      httpHeaders: {
-        'Authorization': auth,
-        'ngrok-skip-browser-warning': 'true',
-      },
-    );
+    try {
+      final bool isLocal = widget.videoUrl.startsWith('/') || widget.videoUrl.startsWith('file://');
 
-    _controller.addListener(_videoListener);
-    await _controller.initialize();
-    if (mounted) {
-      setState(() {});
-      _controller.play();
-      _controller.setVolume(_volumeBoost > 1.0 ? 1.0 : _volumeBoost);
-      _startHideTimer();
-    }
+      if (isLocal) {
+        String cleanPath = widget.videoUrl;
+        if (cleanPath.contains('?')) cleanPath = cleanPath.split('?')[0];
+        if (cleanPath.contains('&')) cleanPath = cleanPath.split('&')[0];
+        
+        final file = File(cleanPath);
+        if (!await file.exists()) {
+          throw Exception("File not found at: $cleanPath");
+        }
+        _videoPlayerController = VideoPlayerController.file(file);
+      } else {
+        final auth = 'Basic ${base64Encode(utf8.encode('${widget.username}:${widget.password}'))}';
+        final base64Token = auth.split(' ')[1];
+        final separator = widget.videoUrl.contains('?') ? '&' : '?';
+        final finalUrl = '${widget.videoUrl}${separator}auth=$base64Token';
+        
+        _videoPlayerController = VideoPlayerController.networkUrl(
+          Uri.parse(finalUrl),
+          httpHeaders: {
+            'Authorization': auth,
+            'ngrok-skip-browser-warning': 'true',
+          },
+        );
+      }
 
-    if (widget.subtitleUrls.isNotEmpty) {
-      _loadSubtitles(widget.subtitleUrls.first);
+      await _videoPlayerController!.initialize();
+      
+      _chewieController = ChewieController(
+        videoPlayerController: _videoPlayerController!,
+        autoPlay: true,
+        looping: false,
+        aspectRatio: _videoPlayerController!.value.aspectRatio,
+        showControls: false,
+        allowFullScreen: true,
+      );
+
+      _videoPlayerController!.addListener(_videoListener);
+      
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+        _videoPlayerController!.play();
+        _videoPlayerController!.setVolume(_volumeBoost > 1.0 ? 1.0 : _volumeBoost);
+        _startHideTimer();
+        _startProgressSaveTimer();
+        
+        final progress = await VideoProgressManager.getProgress(widget.videoUrl, widget.username);
+        if (progress != null && progress.position > 5000) {
+          _showResumeDialog(progress);
+        }
+      }
+
+      if (widget.subtitleUrls.isNotEmpty) {
+        _loadSubtitles(widget.subtitleUrls.first);
+      }
+
+      _subtitleTimer = Timer.periodic(const Duration(milliseconds: 100), (timer) {
+        if (mounted && _videoPlayerController != null && _videoPlayerController!.value.isPlaying) {
+          _updateSubtitles();
+        }
+      });
+
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _hasError = true;
+          _errorMessage = e.toString();
+        });
+      }
     }
   }
 
   void _videoListener() {
-    if (_controller.value.isPlaying) {
-      _updateSubtitles();
-    }
-    if (_controller.value.position >= _controller.value.duration && _controller.value.duration != Duration.zero) {
-      if (widget.nextEpisode != null) {
-        Navigator.pop(context, {'action': 'playNext', 'episode': widget.nextEpisode});
+    if (_videoPlayerController == null) return;
+    
+    if (_videoPlayerController!.value.hasError) {
+      if (mounted) {
+        setState(() {
+          _hasError = true;
+          _errorMessage = _videoPlayerController!.value.errorDescription ?? 'Unknown Error';
+        });
       }
+      return;
     }
+
+    _checkForVideoCompletion();
     if (mounted) setState(() {});
+  }
+
+  void _checkForVideoCompletion() {
+    if (_videoPlayerController == null || !_videoPlayerController!.value.isInitialized || _nextEpisodeCancelled) return;
+    
+    final duration = _videoPlayerController!.value.duration;
+    final position = _videoPlayerController!.value.position;
+    final remainingTime = duration - position;
+    
+    if (remainingTime.inSeconds <= 20 && widget.nextEpisode != null && !_showNextEpisodeOverlay) {
+      setState(() {
+        _showNextEpisodeOverlay = true;
+      });
+      
+      _capsuleSlideController.forward().then((_) {
+        _progressController.forward();
+        _nextEpisodeTimer?.cancel();
+        _nextEpisodeTimer = Timer(const Duration(seconds: 5), () {
+          if (mounted && _showNextEpisodeOverlay) {
+            _playNextEpisode();
+          }
+        });
+      });
+    }
+  }
+
+  void _playNextEpisode() {
+    if (widget.nextEpisode != null) {
+      _nextEpisodeTimer?.cancel();
+      _saveCurrentPosition();
+      Navigator.of(context).pop({'action': 'playNext', 'episode': widget.nextEpisode});
+    }
+  }
+
+  void _cancelNextEpisode() {
+    _nextEpisodeTimer?.cancel();
+    _capsuleSlideController.reverse();
+    _progressController.stop();
+    _progressController.reset();
+    setState(() {
+      _showNextEpisodeOverlay = false;
+      _nextEpisodeCancelled = true;
+    });
   }
 
   Future<void> _loadSubtitles(String url) async {
     try {
-      final auth = 'Basic ${base64Encode(utf8.encode('${widget.username}:${widget.password}'))}';
-      final response = await http.get(Uri.parse(url), headers: {
-        'Authorization': auth,
-        'ngrok-skip-browser-warning': 'true',
-      });
-      if (response.statusCode == 200) {
-        _parseSRT(response.body);
+      final bool isLocal = url.startsWith('/') || url.startsWith('file://');
+      String content = '';
+
+      if (isLocal) {
+        String cleanPath = url;
+        if (cleanPath.contains('?')) cleanPath = cleanPath.split('?')[0];
+        if (cleanPath.contains('&')) cleanPath = cleanPath.split('&')[0];
+        content = await File(cleanPath).readAsString();
+      } else {
+        final auth = 'Basic ${base64Encode(utf8.encode('${widget.username}:${widget.password}'))}';
+        final response = await http.get(Uri.parse(url), headers: {
+          'Authorization': auth,
+          'ngrok-skip-browser-warning': 'true',
+        });
+        if (response.statusCode == 200) {
+          content = response.body;
+        }
+      }
+
+      if (content.isNotEmpty) {
+        _parseSRT(content);
       }
     } catch (e) {}
   }
@@ -136,8 +427,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
   }
 
   void _updateSubtitles() {
-    if (_subtitles.isEmpty) return;
-    final now = _controller.value.position + Duration(milliseconds: (_subDelay * 1000).toInt());
+    if (_subtitles.isEmpty || _videoPlayerController == null) return;
+    final now = _videoPlayerController!.value.position + Duration(milliseconds: (_subDelay * 1000).toInt());
     final entry = _subtitles.firstWhere(
       (e) => now >= e.start && now <= e.end,
       orElse: () => SubtitleEntry(start: Duration.zero, end: Duration.zero, text: ''),
@@ -155,8 +446,11 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
   void _startHideTimer() {
     _hideTimer?.cancel();
     _hideTimer = Timer(const Duration(seconds: 3), () {
-      if (mounted && _controller.value.isPlaying) {
-        setState(() => _showControls = false);
+      if (mounted && _videoPlayerController != null && _videoPlayerController!.value.isPlaying) {
+        setState(() {
+          _showControls = false;
+          _controlsAnimationController.reverse();
+        });
       }
     });
   }
@@ -164,8 +458,79 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
   void _toggleControls() {
     setState(() {
       _showControls = !_showControls;
-      if (_showControls) _startHideTimer();
+      if (_showControls) {
+        _controlsAnimationController.forward();
+        _startHideTimer();
+      } else {
+        _controlsAnimationController.reverse();
+      }
     });
+  }
+
+  void _showSeekIndicator(bool isRewind) {
+    _indicatorTimer?.cancel();
+    setState(() {
+      _showRewindIndicator = isRewind;
+      _showForwardIndicator = !isRewind;
+    });
+    _indicatorTimer = Timer(const Duration(milliseconds: 500), () {
+      if (mounted) {
+        setState(() {
+          _showRewindIndicator = false;
+          _showForwardIndicator = false;
+        });
+      }
+    });
+  }
+
+  void _saveCurrentPosition() {
+    if (_videoPlayerController != null && _videoPlayerController!.value.isInitialized) {
+      VideoProgressManager.saveProgress(
+        widget.videoUrl,
+        widget.username,
+        _videoPlayerController!.value.position.inMilliseconds,
+        _videoPlayerController!.value.duration.inMilliseconds,
+      );
+    }
+  }
+
+  void _startProgressSaveTimer() {
+    _progressSaveTimer?.cancel();
+    _progressSaveTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
+      _saveCurrentPosition();
+    });
+  }
+
+  void _showResumeDialog(VideoProgress progress) {
+    final minutes = (progress.position / 60000).floor();
+    final seconds = ((progress.position % 60000) / 1000).floor();
+    final timeStr = '${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Colors.black87,
+        title: const Text('Resume Playback', style: TextStyle(color: Colors.white)),
+        content: Text('Resume from $timeStr?', style: const TextStyle(color: Colors.white70)),
+        actions: [
+          TextButton(
+            child: const Text('Start Over', style: TextStyle(color: Colors.grey)),
+            onPressed: () {
+              Navigator.pop(context);
+              _videoPlayerController?.seekTo(Duration.zero);
+            },
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF8A2BE2)),
+            child: const Text('Resume'),
+            onPressed: () {
+              Navigator.pop(context);
+              _videoPlayerController?.seekTo(Duration(milliseconds: progress.position));
+            },
+          ),
+        ],
+      ),
+    );
   }
 
   String _formatDuration(Duration d) {
@@ -181,24 +546,43 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
       body: GestureDetector(
         onTap: _toggleControls,
         onDoubleTapDown: (details) {
+          if (_videoPlayerController == null) return;
           final width = MediaQuery.of(context).size.width;
           if (details.globalPosition.dx < width / 2) {
-            _controller.seekTo(_controller.value.position - const Duration(seconds: 10));
+            _videoPlayerController!.seekTo(_videoPlayerController!.value.position - const Duration(seconds: 10));
+            _showSeekIndicator(true);
           } else {
-            _controller.seekTo(_controller.value.position + const Duration(seconds: 10));
+            _videoPlayerController!.seekTo(_videoPlayerController!.value.position + const Duration(seconds: 10));
+            _showSeekIndicator(false);
           }
         },
         child: Stack(
           children: [
             Center(
-              child: _controller.value.isInitialized
-                  ? AspectRatio(
-                      aspectRatio: _controller.value.aspectRatio,
-                      child: VideoPlayer(_controller),
+              child: _hasError
+                  ? Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(Icons.error_outline, color: Colors.red, size: 60),
+                        const SizedBox(height: 20),
+                        Text(_errorMessage, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white70)),
+                        const SizedBox(height: 20),
+                        ElevatedButton(onPressed: _initializePlayer, child: const Text("Retry")),
+                      ],
                     )
-                  : const CircularProgressIndicator(color: Color(0xFF8A2BE2)),
+                  : (_videoPlayerController != null && _videoPlayerController!.value.isInitialized)
+                      ? Transform.scale(
+                          scale: _scale,
+                          child: AspectRatio(
+                            aspectRatio: _videoPlayerController!.value.aspectRatio,
+                            child: VideoPlayer(_videoPlayerController!),
+                          ),
+                        )
+                      : const CircularProgressIndicator(color: Color(0xFF8A2BE2)),
             ),
-            if (_currentSubtitleText.isNotEmpty)
+            if (_showRewindIndicator) Center(child: Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.black54, shape: BoxShape.circle), child: const Icon(Icons.replay_10, color: Colors.white, size: 50))),
+            if (_showForwardIndicator) Center(child: Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.black54, shape: BoxShape.circle), child: const Icon(Icons.forward_10, color: Colors.white, size: 50))),
+            if (_currentSubtitleText.isNotEmpty && !_hasError)
               Positioned(
                 bottom: _showControls ? 150 : 30,
                 left: 20,
@@ -206,66 +590,89 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
                 child: Center(
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: _subBgColor,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
+                    decoration: BoxDecoration(color: _subBgColor, borderRadius: BorderRadius.circular(12)),
                     child: Text(
                       _currentSubtitleText,
                       textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: _subTextColor,
-                        fontSize: _subSize,
-                        fontWeight: FontWeight.w500,
-                        shadows: const [Shadow(blurRadius: 4, color: Colors.black, offset: Offset(2, 2))],
+                      style: TextStyle(color: _subTextColor, fontSize: _subSize, fontWeight: FontWeight.w500, shadows: const [Shadow(blurRadius: 4, color: Colors.black, offset: Offset(2, 2))]),
+                    ),
+                  ),
+                ),
+              ),
+            if (_showNextEpisodeOverlay && widget.nextEpisode != null)
+              SlideTransition(
+                position: _capsuleSlideAnimation,
+                child: Align(
+                  alignment: Alignment.topCenter,
+                  child: Padding(
+                    padding: const EdgeInsets.only(top: 40),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(100),
+                      child: BackdropFilter(
+                        filter: ImageFilter.blur(sigmaX: 25, sigmaY: 25),
+                        child: Container(
+                          width: 550,
+                          height: 80,
+                          decoration: BoxDecoration(
+                            color: Colors.black.withOpacity(0.85),
+                            borderRadius: BorderRadius.circular(100),
+                            border: Border.all(color: const Color(0xFFD866FF).withOpacity(0.6), width: 1.5),
+                          ),
+                          child: Stack(
+                            children: [
+                              AnimatedBuilder(
+                                animation: _progressController,
+                                builder: (context, child) => Container(width: 550 * _progressController.value, decoration: BoxDecoration(gradient: LinearGradient(colors: [Colors.transparent, const Color(0xFFD866FF).withOpacity(0.8)]))),
+                              ),
+                              Padding(
+                                padding: const EdgeInsets.only(left: 35, right: 12),
+                                child: Row(
+                                  children: [
+                                    Expanded(
+                                      child: Column(
+                                        mainAxisAlignment: MainAxisAlignment.center,
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          const Text('UP NEXT', style: TextStyle(color: Color(0xFFD866FF), fontSize: 10, fontWeight: FontWeight.w900, letterSpacing: 2)),
+                                          Text(widget.nextEpisode!['name'] ?? 'Unknown', style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600), overflow: TextOverflow.ellipsis),
+                                        ],
+                                      ),
+                                    ),
+                                    ElevatedButton(
+                                      style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFD866FF), foregroundColor: Colors.white, shape: const StadiumBorder()),
+                                      onPressed: _playNextEpisode,
+                                      child: const Text('PLAY NOW', style: TextStyle(fontWeight: FontWeight.w800)),
+                                    ),
+                                    IconButton(icon: const Icon(Icons.close, color: Colors.white), onPressed: _cancelNextEpisode),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
                       ),
                     ),
                   ),
                 ),
               ),
-            AnimatedOpacity(
-              opacity: _showControls ? 1.0 : 0.0,
-              duration: const Duration(milliseconds: 300),
+            FadeTransition(
+              opacity: _controlsOpacity,
               child: IgnorePointer(
                 ignoring: !_showControls,
                 child: Stack(
                   children: [
-                    Container(
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          begin: Alignment.topCenter,
-                          end: Alignment.bottomCenter,
-                          colors: [Colors.black.withOpacity(0.8), Colors.transparent, Colors.transparent, Colors.black.withOpacity(0.8)],
-                          stops: const [0.0, 0.2, 0.8, 1.0],
-                        ),
-                      ),
-                    ),
+                    Container(decoration: BoxDecoration(gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Colors.black.withOpacity(0.8), Colors.transparent, Colors.transparent, Colors.black.withOpacity(0.8)], stops: const [0.0, 0.2, 0.8, 1.0]))),
                     Positioned(
                       top: 40,
                       left: 20,
                       right: 20,
                       child: Row(
                         children: [
-                          IconButton(
-                            icon: const Icon(Icons.arrow_back, color: Colors.white, size: 30),
-                            onPressed: () => Navigator.pop(context),
-                          ),
+                          IconButton(icon: const Icon(Icons.arrow_back, color: Colors.white, size: 30), onPressed: () => Navigator.pop(context)),
                           const SizedBox(width: 10),
-                          Expanded(
-                            child: Text(
-                              widget.title,
-                              style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.subtitles, color: Colors.white),
-                            onPressed: _showSubtitlePicker,
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.accessibility, color: Colors.white),
-                            onPressed: _showAccessibilityDialog,
-                          ),
+                          Expanded(child: Text(widget.title, style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold), overflow: TextOverflow.ellipsis)),
+                          IconButton(icon: const Icon(Icons.subtitles, color: Colors.white), onPressed: _showSubtitlePicker),
+                          IconButton(icon: const Icon(Icons.accessibility, color: Colors.white), onPressed: _showAccessibilityDialog),
                         ],
                       ),
                     ),
@@ -273,27 +680,23 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          IconButton(
-                            icon: const Icon(Icons.replay_10, color: Color(0xFF8A2BE2), size: 60),
-                            onPressed: () => _controller.seekTo(_controller.value.position - const Duration(seconds: 10)),
-                          ),
+                          IconButton(icon: const Icon(Icons.replay_10, color: Color(0xFF8A2BE2), size: 60), onPressed: () => _videoPlayerController?.seekTo(_videoPlayerController!.value.position - const Duration(seconds: 10))),
                           const SizedBox(width: 60),
                           IconButton(
-                            icon: Icon(
-                              _controller.value.isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled,
-                              color: const Color(0xFF8A2BE2),
-                              size: 90,
-                            ),
+                            icon: Icon(_videoPlayerController?.value.isPlaying == true ? Icons.pause_circle_filled : Icons.play_circle_filled, color: const Color(0xFF8A2BE2), size: 90),
                             onPressed: () {
-                              _controller.value.isPlaying ? _controller.pause() : _controller.play();
+                              setState(() {
+                                if (_videoPlayerController!.value.isPlaying) {
+                                  _videoPlayerController!.pause();
+                                } else {
+                                  _videoPlayerController!.play();
+                                }
+                              });
                               _startHideTimer();
                             },
                           ),
                           const SizedBox(width: 60),
-                          IconButton(
-                            icon: const Icon(Icons.forward_10, color: Color(0xFF8A2BE2), size: 60),
-                            onPressed: () => _controller.seekTo(_controller.value.position + const Duration(seconds: 10)),
-                          ),
+                          IconButton(icon: const Icon(Icons.forward_10, color: Color(0xFF8A2BE2), size: 60), onPressed: () => _videoPlayerController?.seekTo(_videoPlayerController!.value.position + const Duration(seconds: 10))),
                         ],
                       ),
                     ),
@@ -303,30 +706,24 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
                       right: 20,
                       child: Column(
                         children: [
-                          SliderTheme(
-                            data: SliderTheme.of(context).copyWith(
-                              activeTrackColor: const Color(0xFF8A2BE2),
-                              inactiveTrackColor: Colors.white24,
-                              thumbColor: Colors.white,
-                              trackHeight: 4,
-                            ),
-                            child: Slider(
-                              value: _controller.value.position.inMilliseconds.toDouble(),
+                          if (_videoPlayerController != null)
+                            Slider(
+                              value: _videoPlayerController!.value.position.inMilliseconds.toDouble().clamp(0, _videoPlayerController!.value.duration.inMilliseconds.toDouble()),
                               min: 0.0,
-                              max: _controller.value.duration.inMilliseconds.toDouble(),
+                              max: _videoPlayerController!.value.duration.inMilliseconds.toDouble(),
+                              activeColor: const Color(0xFF8A2BE2),
                               onChanged: (v) {
-                                _controller.seekTo(Duration(milliseconds: v.toInt()));
+                                _videoPlayerController!.seekTo(Duration(milliseconds: v.toInt()));
                                 _startHideTimer();
                               },
                             ),
-                          ),
                           Padding(
                             padding: const EdgeInsets.symmetric(horizontal: 16),
                             child: Row(
                               mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               children: [
-                                Text(_formatDuration(_controller.value.position), style: const TextStyle(color: Colors.white)),
-                                Text(_formatDuration(_controller.value.duration), style: const TextStyle(color: Colors.white)),
+                                Text(_formatDuration(_videoPlayerController?.value.position ?? Duration.zero), style: const TextStyle(color: Colors.white)),
+                                Text(_formatDuration(_videoPlayerController?.value.duration ?? Duration.zero), style: const TextStyle(color: Colors.white)),
                               ],
                             ),
                           ),
@@ -344,51 +741,32 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
   }
 
   void _showSubtitlePicker() async {
-    final auth = 'Basic ${base64Encode(utf8.encode('${widget.username}:${widget.password}'))}';
-    final videoPath = Uri.parse(widget.videoUrl).queryParameters['path'] ?? '';
-    final response = await http.get(
-      Uri.parse('http://${widget.serverIp}:${widget.serverPort}/api/find-subtitles?path=${Uri.encodeComponent(videoPath)}'),
-      headers: {'Authorization': auth, 'ngrok-skip-browser-warning': 'true'},
-    );
-
-    if (response.statusCode == 200) {
-      final data = json.decode(response.body);
-      if (data['success'] == true) {
-        final subs = List<Map<String, dynamic>>.from(data['subtitles']);
-        showDialog(
-          context: context,
-          builder: (context) => AlertDialog(
-            backgroundColor: const Color(0xFF111111),
-            title: const Text('Subtitles', style: TextStyle(color: Colors.white)),
-            content: SizedBox(
-              width: double.maxFinite,
-              child: ListView.builder(
-                shrinkWrap: true,
-                itemCount: subs.length + 1,
-                itemBuilder: (context, i) {
-                  if (i == 0) {
-                    return ListTile(
-                      title: const Text('None', style: TextStyle(color: Colors.white)),
-                      onTap: () {
-                        setState(() => _subtitles.clear());
-                        Navigator.pop(context);
-                      },
-                    );
-                  }
-                  final s = subs[i - 1];
-                  return ListTile(
-                    title: Text(s['name'], style: const TextStyle(color: Colors.white)),
-                    onTap: () {
-                      _loadSubtitles('http://${widget.serverIp}:${widget.serverPort}/api/subtitle?path=${Uri.encodeComponent(s['path'])}');
-                      Navigator.pop(context);
-                    },
-                  );
-                },
-              ),
+    final bool isLocal = widget.videoUrl.startsWith('/') || widget.videoUrl.startsWith('file://');
+    if (isLocal) {
+      String cleanPath = widget.videoUrl;
+      if (cleanPath.contains('?')) cleanPath = cleanPath.split('?')[0];
+      final dir = Directory(path.dirname(cleanPath));
+      final files = dir.listSync().where((f) => f.path.endsWith('.srt')).toList();
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          backgroundColor: const Color(0xFF111111),
+          title: const Text('Subtitles', style: TextStyle(color: Colors.white)),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: ListView.builder(
+              shrinkWrap: true,
+              itemCount: files.length + 1,
+              itemBuilder: (context, i) {
+                if (i == 0) return ListTile(title: const Text('None', style: TextStyle(color: Colors.white)), onTap: () { setState(() => _subtitles.clear()); Navigator.pop(context); });
+                final s = files[i - 1];
+                return ListTile(title: Text(path.basename(s.path), style: const TextStyle(color: Colors.white)), onTap: () { _loadSubtitles(s.path); Navigator.pop(context); });
+              },
             ),
           ),
-        );
-      }
+        ),
+      );
+      return;
     }
   }
 
@@ -398,43 +776,22 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
           backgroundColor: const Color(0xFF111111),
-          shape: RoundedRectangleBorder(side: const BorderSide(color: Color(0xFF8A2BE2)), borderRadius: BorderRadius.circular(20)),
           title: const Text('Accessibility', style: TextStyle(color: Colors.white)),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               _buildAccRow('Volume Boost', '${_volumeBoost.toStringAsFixed(1)}x', () {
-                setState(() {
-                  _volumeBoost = math.max(1.0, _volumeBoost - 1.0);
-                  _controller.setVolume(_volumeBoost > 1.0 ? 1.0 : _volumeBoost);
-                });
+                setState(() { _volumeBoost = math.max(1.0, _volumeBoost - 1.0); _videoPlayerController?.setVolume(_volumeBoost > 1.0 ? 1.0 : _volumeBoost); });
                 setDialogState(() {});
               }, () {
-                setState(() {
-                  _volumeBoost = math.min(20.0, _volumeBoost + 1.0);
-                  _controller.setVolume(_volumeBoost > 1.0 ? 1.0 : _volumeBoost);
-                });
+                setState(() { _volumeBoost = math.min(20.0, _volumeBoost + 1.0); _videoPlayerController?.setVolume(_volumeBoost > 1.0 ? 1.0 : _volumeBoost); });
                 setDialogState(() {});
               }),
-              _buildAccRow('Font Size', '${_subSize.toInt()}px', () {
-                setState(() => _subSize -= 2);
-                setDialogState(() {});
-              }, () {
-                setState(() => _subSize += 2);
-                setDialogState(() {});
-              }),
-              _buildAccRow('Delay', '${_subDelay.toStringAsFixed(1)}s', () {
-                setState(() => _subDelay -= 0.5);
-                setDialogState(() {});
-              }, () {
-                setState(() => _subDelay += 0.5);
-                setDialogState(() {});
-              }),
+              _buildAccRow('Font Size', '${_subSize.toInt()}px', () { setState(() => _subSize -= 2); setDialogState(() {}); }, () { setState(() => _subSize += 2); setDialogState(() {}); }),
+              _buildAccRow('Delay', '${_subDelay.toStringAsFixed(1)}s', () { setState(() => _subDelay -= 0.5); setDialogState(() {}); }, () { setState(() => _subDelay += 0.5); setDialogState(() {}); }),
             ],
           ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close', style: TextStyle(color: Color(0xFF8A2BE2)))),
-          ],
+          actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close', style: TextStyle(color: Color(0xFF8A2BE2))))],
         ),
       ),
     );
@@ -461,23 +818,20 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
 
   @override
   void dispose() {
+    _saveCurrentPosition();
     _hideTimer?.cancel();
-    _controller.removeListener(_videoListener);
-    _controller.dispose();
-    SystemChrome.setPreferredOrientations([
-      DeviceOrientation.portraitUp,
-      DeviceOrientation.portraitDown,
-      DeviceOrientation.landscapeLeft,
-      DeviceOrientation.landscapeRight,
-    ]);
+    _subtitleTimer?.cancel();
+    _progressSaveTimer?.cancel();
+    _nextEpisodeTimer?.cancel();
+    _videoPlayerController?.removeListener(_videoListener);
+    _videoPlayerController?.dispose();
+    _chewieController?.dispose();
+    _controlsAnimationController.dispose();
+    _capsuleSlideController.dispose();
+    _progressController.dispose();
+    SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp, DeviceOrientation.portraitDown, DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    WakelockPlus.disable();
     super.dispose();
   }
-}
-
-class SubtitleEntry {
-  final Duration start;
-  final Duration end;
-  final String text;
-  SubtitleEntry({required this.start, required this.end, required this.text});
 }

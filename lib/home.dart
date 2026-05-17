@@ -15,6 +15,7 @@ import 'package:open_file/open_file.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'login.dart';
 import 'video_player.dart';
+import 'downloads.dart';
 
 class HomeScreen extends StatefulWidget {
   final String serverIp;
@@ -44,6 +45,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   bool _isLoading = true;
   String _error = '';
   bool _userInteracting = false;
+  Set<String> _downloadedPaths = {};
+  StreamSubscription? _downloadSubscription;
   
   final TextEditingController _searchController = TextEditingController();
   List<Map<String, dynamic>> _searchResults = [];
@@ -76,7 +79,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       vsync: this,
       duration: const Duration(milliseconds: 1500),
     )..repeat();
-    _loadFiles();
+    _refreshData();
+    _downloadSubscription = DownloadsManager().progressController.stream.listen((_) {
+      _loadDownloadedPaths();
+    });
     _searchController.addListener(() {
       if (_searchController.text.isEmpty && _isSearching) {
         setState(() {
@@ -86,6 +92,20 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       }
     });
     _mainScrollController.addListener(_checkScrollPosition);
+  }
+
+  Future<void> _refreshData() async {
+    await _loadDownloadedPaths();
+    await _loadFiles();
+  }
+
+  Future<void> _loadDownloadedPaths() async {
+    final downloads = await DownloadsManager().getDownloads();
+    if (mounted) {
+      setState(() {
+        _downloadedPaths = downloads.map((e) => e.title.replaceAll(RegExp(r'[^\w\s]+'), '')).toSet();
+      });
+    }
   }
   
   void _checkScrollPosition() {
@@ -566,15 +586,81 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     return '${(size / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
   }
 
+  Future<List<String>> _getSubtitleUrls(String videoPath, String videoName) async {
+    List<String> subtitleUrls = [];
+    try {
+      final uri = Uri.parse('$_baseUrl/api/find-subtitles').replace(queryParameters: {'path': videoPath, 'videoName': videoName});
+      final headers = <String, String>{};
+      if (_authHeader.isNotEmpty) headers['Authorization'] = _authHeader;
+      final response = await http.get(uri, headers: headers);
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        if (data['success'] == true && data['subtitles'] != null) {
+          subtitleUrls = List<Map<String, dynamic>>.from(data['subtitles']).map((s) => '$_baseUrl/api/subtitle?path=${Uri.encodeComponent(s['path'])}').toList();
+        }
+      }
+    } catch (e) {}
+    return subtitleUrls;
+  }
+
   void _downloadMovie(Map<String, dynamic> movie, String posterUrl) async {
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Download not implemented yet')));
+    final title = movie['folderName'] ?? path.basenameWithoutExtension(movie['name']);
+    final subs = await _getSubtitleUrls(movie['path'], movie['name']);
+    
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Downloading $title'), backgroundColor: Colors.purple.shade900));
+    
+    final downloadsManager = DownloadsManager();
+    downloadsManager.startDownload(
+      videoUrl: '$_baseUrl/api/stream?path=${Uri.encodeComponent(movie['path'])}',
+      title: title,
+      posterUrl: posterUrl,
+      subtitleUrls: subs,
+      authHeader: _authHeader,
+      onNotify: (m) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m), backgroundColor: Colors.purple.shade900));
+        _loadDownloadedPaths();
+      },
+    );
+  }
+
+  void _downloadEpisode(Map<String, dynamic> ep, String showTitle, String seasonName, String showPosterUrl) async {
+    final subs = await _getSubtitleUrls(ep['path'], ep['name']);
+    final thumbUrl = '$_baseUrl/api/thumbnail?path=${Uri.encodeComponent(ep['path'])}';
+    
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Downloading ${ep['name']}'), backgroundColor: Colors.purple.shade900));
+    
+    final downloadsManager = DownloadsManager();
+    downloadsManager.startDownload(
+      videoUrl: '$_baseUrl/api/stream?path=${Uri.encodeComponent(ep['path'])}',
+      title: ep['name'],
+      posterUrl: showPosterUrl,
+      subtitleUrls: subs,
+      authHeader: _authHeader,
+      showTitle: showTitle,
+      seasonName: seasonName,
+      episodeThumbnailUrl: thumbUrl,
+      onNotify: (m) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m), backgroundColor: Colors.purple.shade900));
+        _loadDownloadedPaths();
+      },
+    );
+  }
+
+  void _downloadSeason(String seasonName, List<Map<String, dynamic>> episodes, String showTitle, String showPosterUrl) async {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Starting season download: $seasonName'), backgroundColor: Colors.purple.shade900));
+    for (var ep in episodes) {
+      final isDownloaded = _downloadedPaths.any((p) => p.contains(ep['name'].replaceAll(RegExp(r'[^\w\s]+'), '')));
+      if (!isDownloaded) {
+        _downloadEpisode(ep, showTitle, seasonName, showPosterUrl);
+        await Future.delayed(const Duration(milliseconds: 500));
+      }
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
-      extendBodyBehindAppBar: _currentPath.isEmpty && !_isInTvShowDetail,
       appBar: AppBar(
         backgroundColor: Colors.black.withOpacity(0.5),
         elevation: 0,
@@ -582,6 +668,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         leading: (_currentPath.isEmpty && !_isInTvShowDetail) ? null : IconButton(icon: const Icon(Icons.arrow_back), onPressed: _navigateUp),
         actions: [
           if (_currentPath.isEmpty && !_isInTvShowDetail) ...[
+            IconButton(icon: const Icon(Icons.file_download), onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => const DownloadsScreen())).then((_) => _loadDownloadedPaths())),
             IconButton(icon: const Icon(Icons.search), onPressed: _showSearchDialog),
           ],
           PopupMenuButton<String>(
@@ -641,6 +728,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         username: widget.username,
         password: widget.password,
         playVideo: _playVideo,
+        onDownloadEpisode: (ep) => _downloadEpisode(ep, _selectedTvShow!['name'], _selectedSeason!, _getPosterUrl(_selectedTvShow!)),
+        onDownloadSeason: () => _downloadSeason(_selectedSeason!, _episodes, _selectedTvShow!['name'], _getPosterUrl(_selectedTvShow!)),
+        downloadedPaths: _downloadedPaths,
+        baseUrl: _baseUrl,
       );
     } else if (_currentPath.isEmpty) {
       return _isSearching ? _buildSearchResults() : _buildHomeScreen();
@@ -651,7 +742,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
 
   Widget _buildHomeScreen() {
     return RefreshIndicator(
-      onRefresh: _loadFiles,
+      onRefresh: _refreshData,
       child: SingleChildScrollView(
         controller: _mainScrollController,
         child: Column(
@@ -691,6 +782,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                 downloadMovie: _downloadMovie,
                 nextPage: _nextPage,
                 previousPage: _previousPage,
+                downloadedPaths: _downloadedPaths,
+                baseUrl: _baseUrl,
               ),
           ],
         ),
@@ -716,6 +809,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
             itemBuilder: (context, index) {
               final item = paginatedResults[index];
               final isDir = item['type'] == 'directory';
+              final url = _getPosterUrl(item);
+              final isDownloaded = _downloadedPaths.any((p) => p.contains(item['name'].replaceAll(RegExp(r'[^\w\s]+'), '')));
+              final isCurrentlyDownloading = DownloadsManager().activeMetadata.values.any((m) => m.title == item['name']);
+
               return Column(
                 children: [
                   Expanded(
@@ -728,7 +825,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                           children: [
                             _buildShimmerEffect(),
                             Image.network(
-                              _getPosterUrl(item),
+                              url,
                               headers: {'Authorization': _authHeader},
                               fit: BoxFit.cover,
                               loadingBuilder: (context, child, loadingProgress) {
@@ -738,6 +835,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                               errorBuilder: (c, e, s) => Container(color: Colors.grey[900]),
                             ),
                             Positioned.fill(child: Material(color: Colors.transparent, child: InkWell(onTap: () => isDir ? _navigateToFolder(item['name']) : _playVideo(item)))),
+                            if (!isDir) Positioned(bottom: 8, right: 8, child: GestureDetector(onTap: (isDownloaded || isCurrentlyDownloading) ? null : () => _downloadMovie(item, url), child: Container(padding: const EdgeInsets.all(6), decoration: BoxDecoration(color: (isDownloaded || isCurrentlyDownloading) ? Colors.green : const Color(0xFF8A2BE2), borderRadius: BorderRadius.circular(4)), child: Icon((isDownloaded || isCurrentlyDownloading) ? Icons.check : Icons.file_download, color: Colors.white, size: 18)))),
                           ],
                         ),
                       ),
@@ -762,6 +860,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       itemBuilder: (context, index) {
         final item = _files[index];
         final isDir = item['type'] == 'directory';
+        final url = _getPosterUrl(item);
+        final isDownloaded = _downloadedPaths.any((p) => p.contains(item['name'].replaceAll(RegExp(r'[^\w\s]+'), '')));
+        final isCurrentlyDownloading = DownloadsManager().activeMetadata.values.any((m) => m.title == item['name']);
+
         return GestureDetector(
           onTap: () => isDir ? _navigateToFolder(item['name']) : _playVideo(item),
           child: Column(
@@ -776,7 +878,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                       children: [
                         _buildShimmerEffect(),
                         Image.network(
-                          _getPosterUrl(item),
+                          url,
                           headers: {'Authorization': _authHeader},
                           fit: BoxFit.cover,
                           loadingBuilder: (context, child, loadingProgress) {
@@ -786,6 +888,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                           errorBuilder: (c, e, s) => Container(color: Colors.grey[900]),
                         ),
                         if (isDir) const Positioned(bottom: 8, right: 8, child: Icon(Icons.folder, color: Colors.white, size: 18)),
+                        if (!isDir) Positioned(bottom: 8, right: 8, child: GestureDetector(onTap: (isDownloaded || isCurrentlyDownloading) ? null : () => _downloadMovie(item, url), child: Container(padding: const EdgeInsets.all(6), decoration: BoxDecoration(color: (isDownloaded || isCurrentlyDownloading) ? Colors.green : const Color(0xFF8A2BE2), borderRadius: BorderRadius.circular(4)), child: Icon((isDownloaded || isCurrentlyDownloading) ? Icons.check : Icons.file_download, color: Colors.white, size: 18)))),
                       ],
                     ),
                   ),
@@ -804,6 +907,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
 
   @override
   void dispose() {
+    _downloadSubscription?.cancel();
     _mainScrollController.dispose();
     _tvShowsScrollController.dispose();
     _seasonsScrollController.dispose();
@@ -1005,6 +1109,10 @@ class TvShowDetailWidget extends StatefulWidget {
   final String username;
   final String password;
   final Function(Map<String, dynamic>) playVideo;
+  final Function(Map<String, dynamic>) onDownloadEpisode;
+  final VoidCallback onDownloadSeason;
+  final Set<String> downloadedPaths;
+  final String baseUrl;
 
   const TvShowDetailWidget({
     super.key,
@@ -1023,6 +1131,10 @@ class TvShowDetailWidget extends StatefulWidget {
     required this.username,
     required this.password,
     required this.playVideo,
+    required this.onDownloadEpisode,
+    required this.onDownloadSeason,
+    required this.downloadedPaths,
+    required this.baseUrl,
   });
 
   @override
@@ -1033,6 +1145,9 @@ class _TvShowDetailWidgetState extends State<TvShowDetailWidget> {
   @override
   Widget build(BuildContext context) {
     final posterUrl = widget.selectedTvShow != null ? widget.getPosterUrl(widget.selectedTvShow!) : '';
+    final isSeasonDownloaded = widget.episodes.isNotEmpty && widget.episodes.every((ep) => widget.downloadedPaths.any((p) => p.contains(ep['name'].replaceAll(RegExp(r'[^\w\s]+'), ''))));
+    final isSeasonDownloading = widget.episodes.isNotEmpty && widget.episodes.any((ep) => DownloadsManager().activeMetadata.values.any((m) => m.title == ep['name']));
+
     return Stack(
       children: [
         Positioned.fill(
@@ -1075,21 +1190,34 @@ class _TvShowDetailWidgetState extends State<TvShowDetailWidget> {
                 ),
               ),
               if (widget.seasons.isNotEmpty)
-                Container(
-                  height: 50,
+                Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 16),
-                  child: ListView.builder(
-                    controller: widget.seasonsScrollController,
-                    scrollDirection: Axis.horizontal,
-                    itemCount: widget.seasons.length,
-                    itemBuilder: (context, index) => Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 4),
-                      child: ElevatedButton(
-                        onPressed: () => widget.loadSeasonEpisodes(widget.seasons[index]['name']),
-                        style: ElevatedButton.styleFrom(backgroundColor: widget.selectedSeason == widget.seasons[index]['name'] ? const Color(0xFF8A2BE2) : Colors.grey[800]),
-                        child: Text(widget.seasons[index]['name']),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: SizedBox(
+                          height: 50,
+                          child: ListView.builder(
+                            controller: widget.seasonsScrollController,
+                            scrollDirection: Axis.horizontal,
+                            itemCount: widget.seasons.length,
+                            itemBuilder: (context, index) => Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 4),
+                              child: ElevatedButton(
+                                onPressed: () => widget.loadSeasonEpisodes(widget.seasons[index]['name']),
+                                style: ElevatedButton.styleFrom(backgroundColor: widget.selectedSeason == widget.seasons[index]['name'] ? const Color(0xFF8A2BE2) : Colors.grey[800]),
+                                child: Text(widget.seasons[index]['name']),
+                              ),
+                            ),
+                          ),
+                        ),
                       ),
-                    ),
+                      const SizedBox(width: 10),
+                      IconButton(
+                        icon: Icon((isSeasonDownloaded || isSeasonDownloading) ? Icons.check : Icons.file_download, color: (isSeasonDownloaded || isSeasonDownloading) ? Colors.green : const Color(0xFF8A2BE2)),
+                        onPressed: (isSeasonDownloaded || isSeasonDownloading) ? null : widget.onDownloadSeason,
+                      ),
+                    ],
                   ),
                 ),
               const SizedBox(height: 16),
@@ -1117,7 +1245,10 @@ class _TvShowDetailWidgetState extends State<TvShowDetailWidget> {
       itemCount: sorted.length,
       itemBuilder: (context, index) {
         final ep = sorted[index];
-        final thumbUrl = 'http://${widget.serverIp}:${widget.serverPort}/api/thumbnail?path=${Uri.encodeComponent(ep['path'])}';
+        final thumbUrl = '${widget.baseUrl}/api/thumbnail?path=${Uri.encodeComponent(ep['path'])}';
+        final isDownloaded = widget.downloadedPaths.any((p) => p.contains(ep['name'].replaceAll(RegExp(r'[^\w\s]+'), '')));
+        final isCurrentlyDownloading = DownloadsManager().activeMetadata.values.any((m) => m.title == ep['name']);
+
         return GestureDetector(
           onTap: () => widget.playVideo(ep),
           child: ClipRRect(
@@ -1146,6 +1277,18 @@ class _TvShowDetailWidgetState extends State<TvShowDetailWidget> {
                     child: Text(ep['name'], maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 12)),
                   ),
                 ),
+                Positioned(
+                  top: 5,
+                  right: 5,
+                  child: GestureDetector(
+                    onTap: (isDownloaded || isCurrentlyDownloading) ? null : () => widget.onDownloadEpisode(ep),
+                    child: Container(
+                      padding: const EdgeInsets.all(4),
+                      decoration: BoxDecoration(color: (isDownloaded || isCurrentlyDownloading) ? Colors.green : const Color(0xFF8A2BE2), borderRadius: BorderRadius.circular(4)),
+                      child: Icon((isDownloaded || isCurrentlyDownloading) ? Icons.check : Icons.file_download, color: Colors.white, size: 16),
+                    ),
+                  ),
+                ),
               ],
             ),
           ),
@@ -1168,6 +1311,8 @@ class MoviesGridWidget extends StatelessWidget {
   final Function(Map<String, dynamic>, String) downloadMovie;
   final Function() nextPage;
   final Function() previousPage;
+  final Set<String> downloadedPaths;
+  final String baseUrl;
 
   const MoviesGridWidget({
     super.key,
@@ -1183,6 +1328,8 @@ class MoviesGridWidget extends StatelessWidget {
     required this.downloadMovie,
     required this.nextPage,
     required this.previousPage,
+    required this.downloadedPaths,
+    required this.baseUrl,
   });
 
   @override
@@ -1205,6 +1352,9 @@ class MoviesGridWidget extends StatelessWidget {
           itemBuilder: (context, index) {
             final movie = paginated[index];
             final url = getPosterUrl(movie);
+            final isDownloaded = downloadedPaths.any((p) => p.contains(movie['name'].replaceAll(RegExp(r'[^\w\s]+'), '')));
+            final isCurrentlyDownloading = DownloadsManager().activeMetadata.values.any((m) => m.title == movie['name']);
+
             return Column(
               children: [
                 Expanded(
@@ -1227,6 +1377,7 @@ class MoviesGridWidget extends StatelessWidget {
                             errorBuilder: (c, e, s) => Container(color: Colors.grey[900]),
                           ),
                           Positioned.fill(child: Material(color: Colors.transparent, child: InkWell(onTap: () => playVideo(movie)))),
+                          Positioned(bottom: 8, right: 8, child: GestureDetector(onTap: (isDownloaded || isCurrentlyDownloading) ? null : () => downloadMovie(movie, url), child: Container(padding: const EdgeInsets.all(6), decoration: BoxDecoration(color: (isDownloaded || isCurrentlyDownloading) ? Colors.green : const Color(0xFF8A2BE2), borderRadius: BorderRadius.circular(4)), child: Icon((isDownloaded || isCurrentlyDownloading) ? Icons.check : Icons.file_download, color: Colors.white, size: 18)))),
                         ],
                       ),
                     ),

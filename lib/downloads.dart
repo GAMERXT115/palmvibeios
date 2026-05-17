@@ -1,0 +1,632 @@
+import 'dart:convert';
+import 'dart:io';
+import 'dart:async';
+import 'dart:ui';
+import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:path/path.dart' as path;
+import 'video_player.dart';
+
+class DownloadItem {
+  final String title;
+  final String localVideoPath;
+  final String localPosterPath;
+  final List<String> localSubtitlePaths;
+  final String duration;
+  final String? showTitle;
+  final String? seasonName;
+  final String? episodeThumbnailPath;
+
+  DownloadItem({
+    required this.title,
+    required this.localVideoPath,
+    required this.localPosterPath,
+    required this.localSubtitlePaths,
+    this.duration = "0:00",
+    this.showTitle,
+    this.seasonName,
+    this.episodeThumbnailPath,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'title': title,
+        'localVideoPath': localVideoPath,
+        'localPosterPath': localPosterPath,
+        'localSubtitlePaths': localSubtitlePaths,
+        'duration': duration,
+        'showTitle': showTitle,
+        'seasonName': seasonName,
+        'episodeThumbnailPath': episodeThumbnailPath,
+      };
+
+  factory DownloadItem.fromJson(Map<String, dynamic> json) => DownloadItem(
+        title: json['title'],
+        localVideoPath: json['localVideoPath'],
+        localPosterPath: json['localPosterPath'],
+        localSubtitlePaths: List<String>.from(json['localSubtitlePaths']),
+        duration: json['duration'] ?? "0:00",
+        seasonName: json['seasonName'],
+        showTitle: json['showTitle'],
+        episodeThumbnailPath: json['episodeThumbnailPath'],
+      );
+}
+
+class DownloadsManager {
+  static final DownloadsManager _instance = DownloadsManager._internal();
+  factory DownloadsManager() => _instance;
+  DownloadsManager._internal();
+
+  final Map<String, double> downloadProgress = {};
+  final Map<String, DownloadItem> activeMetadata = {};
+  final Map<String, bool> cancelRequests = {};
+  final StreamController<Map<String, double>> progressController = StreamController<Map<String, double>>.broadcast();
+
+  Future<void> startDownload({
+    required String videoUrl,
+    required String title,
+    required String posterUrl,
+    required List<String> subtitleUrls,
+    required String authHeader,
+    required Function(String) onNotify,
+    String? showTitle,
+    String? seasonName,
+    String? episodeThumbnailUrl,
+    String duration = "0:00",
+  }) async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final folderName = showTitle ?? title;
+      final cleanFolderName = folderName.replaceAll(RegExp(r'[^\w\s]+'), '');
+      final saveDir = Directory('${dir.path}/downloads/$cleanFolderName');
+      
+      if (!await saveDir.exists()) {
+        await saveDir.create(recursive: true);
+      }
+
+      final posterPath = '${saveDir.path}/poster.jpg';
+      if (!File(posterPath).existsSync()) {
+        await _downloadStaticFile(posterUrl, posterPath, authHeader);
+      }
+
+      String? thumbPath;
+      if (episodeThumbnailUrl != null) {
+        thumbPath = '${saveDir.path}/${title.replaceAll(RegExp(r'[^\w\s]+'), '')}_thumb.jpg';
+        await _downloadStaticFile(episodeThumbnailUrl, thumbPath, authHeader);
+      }
+
+      final videoExt = path.extension(Uri.parse(videoUrl).path).isEmpty ? ".mp4" : path.extension(Uri.parse(videoUrl).path);
+      final videoPath = '${saveDir.path}/${title.replaceAll(RegExp(r'[^\w\s]+'), '')}_video$videoExt';
+
+      activeMetadata[videoUrl] = DownloadItem(
+        title: title,
+        localVideoPath: videoPath,
+        localPosterPath: posterPath,
+        localSubtitlePaths: [],
+        duration: duration,
+        showTitle: showTitle,
+        seasonName: seasonName,
+        episodeThumbnailPath: thumbPath,
+      );
+
+      downloadProgress[videoUrl] = 0.0;
+      cancelRequests[videoUrl] = false;
+      progressController.add(downloadProgress);
+
+      final client = http.Client();
+      final request = http.Request('GET', Uri.parse(videoUrl));
+      request.headers.addAll({
+        'Authorization': authHeader,
+        'ngrok-skip-browser-warning': 'true',
+      });
+
+      final response = await client.send(request);
+      final total = response.contentLength ?? 0;
+      int received = 0;
+
+      final file = File(videoPath);
+      final sink = file.openWrite();
+
+      await for (var chunk in response.stream) {
+        if (cancelRequests[videoUrl] == true) {
+          await sink.close();
+          if (await file.exists()) await file.delete();
+          _cleanupActive(videoUrl);
+          client.close();
+          return;
+        }
+        received += chunk.length;
+        sink.add(chunk);
+        if (total > 0) {
+          downloadProgress[videoUrl] = received / total;
+          progressController.add(downloadProgress);
+        }
+      }
+
+      await sink.close();
+
+      List<String> localSubs = [];
+      for (int i = 0; i < subtitleUrls.length; i++) {
+        final sPath = '${saveDir.path}/${title.replaceAll(RegExp(r'[^\w\s]+'), '')}_sub_$i.srt';
+        await _downloadStaticFile(subtitleUrls[i], sPath, authHeader);
+        localSubs.add(sPath);
+      }
+
+      final finalItem = DownloadItem(
+        title: title,
+        localVideoPath: videoPath,
+        localPosterPath: posterPath,
+        localSubtitlePaths: localSubs,
+        duration: duration,
+        showTitle: showTitle,
+        seasonName: seasonName,
+        episodeThumbnailPath: thumbPath,
+      );
+
+      await _saveMetadata(finalItem);
+      _cleanupActive(videoUrl);
+      onNotify('Download complete: $title');
+    } catch (e) {
+      _cleanupActive(videoUrl);
+      onNotify('Download failed: $e');
+    }
+  }
+
+  void _cleanupActive(String url) {
+    downloadProgress.remove(url);
+    activeMetadata.remove(url);
+    cancelRequests.remove(url);
+    progressController.add(downloadProgress);
+  }
+
+  Future<void> _downloadStaticFile(String url, String savePath, String auth) async {
+    final response = await http.get(Uri.parse(url), headers: {
+      'Authorization': auth,
+      'ngrok-skip-browser-warning': 'true',
+    });
+    if (response.statusCode == 200) {
+      final file = File(savePath);
+      await file.writeAsBytes(response.bodyBytes);
+    }
+  }
+
+  Future<void> _saveMetadata(DownloadItem item) async {
+    final prefs = await SharedPreferences.getInstance();
+    List<String> list = prefs.getStringList('downloaded_content_v2') ?? [];
+    list.add(jsonEncode(item.toJson()));
+    await prefs.setStringList('downloaded_content_v2', list);
+  }
+
+  Future<List<DownloadItem>> getDownloads() async {
+    final prefs = await SharedPreferences.getInstance();
+    List<String> list = prefs.getStringList('downloaded_content_v2') ?? [];
+    return list.map((e) => DownloadItem.fromJson(jsonDecode(e))).toList();
+  }
+
+  Future<void> deleteDownload(DownloadItem item) async {
+    final prefs = await SharedPreferences.getInstance();
+    List<String> list = prefs.getStringList('downloaded_content_v2') ?? [];
+    list.removeWhere((e) => DownloadItem.fromJson(jsonDecode(e)).localVideoPath == item.localVideoPath);
+    await prefs.setStringList('downloaded_content_v2', list);
+
+    final vFile = File(item.localVideoPath);
+    if (await vFile.exists()) await vFile.delete();
+  }
+
+  Future<void> deleteShow(String showTitle) async {
+    final downloads = await getDownloads();
+    final toDelete = downloads.where((i) => i.showTitle == showTitle).toList();
+    for (var item in toDelete) {
+      await deleteDownload(item);
+    }
+  }
+
+  void stopDownload(String url) {
+    cancelRequests[url] = true;
+  }
+}
+
+class DownloadsScreen extends StatefulWidget {
+  const DownloadsScreen({super.key});
+
+  @override
+  State<DownloadsScreen> createState() => _DownloadsScreenState();
+}
+
+class _DownloadsScreenState extends State<DownloadsScreen> {
+  List<DownloadItem> _movies = [];
+  Map<String, List<DownloadItem>> _tvShows = {};
+  bool _isLoading = true;
+  StreamSubscription? _progressSubscription;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadDownloads();
+    _progressSubscription = DownloadsManager().progressController.stream.listen((_) {
+      _loadDownloads();
+    });
+  }
+
+  @override
+  void dispose() {
+    _progressSubscription?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _loadDownloads() async {
+    final items = await DownloadsManager().getDownloads();
+    if (mounted) {
+      setState(() {
+        _movies = items.where((i) => i.showTitle == null).toList();
+        _tvShows = {};
+        for (var ep in items.where((i) => i.showTitle != null)) {
+          _tvShows.putIfAbsent(ep.showTitle!, () => []).add(ep);
+        }
+        _isLoading = false;
+      });
+    }
+  }
+
+  Future<bool?> _showDeleteConfirmation(BuildContext context, String title) {
+    return showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Colors.grey[900],
+        title: const Text("Confirm Delete", style: TextStyle(color: Colors.white)),
+        content: Text("Are you sure you want to delete '$title'?", style: const TextStyle(color: Colors.white70)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text("Cancel", style: TextStyle(color: Colors.grey))),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text("Yes", style: TextStyle(color: Colors.redAccent))),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return DefaultTabController(
+      length: 2,
+      child: Scaffold(
+        backgroundColor: Colors.black,
+        appBar: AppBar(
+          title: const Text('Downloads'),
+          backgroundColor: Colors.black,
+          bottom: const TabBar(
+            indicatorColor: Color(0xFF8A2BE2),
+            tabs: [Tab(text: "Movies"), Tab(text: "TV Shows")],
+          ),
+        ),
+        body: _isLoading
+            ? const Center(child: CircularProgressIndicator(color: Color(0xFF8A2BE2)))
+            : TabBarView(
+                children: [
+                  _buildMoviesList(),
+                  _buildTvShowsList(),
+                ],
+              ),
+      ),
+    );
+  }
+
+  Widget _buildMoviesList() {
+    return StreamBuilder<Map<String, double>>(
+      stream: DownloadsManager().progressController.stream,
+      builder: (context, snapshot) {
+        final active = snapshot.data ?? {};
+        final activeMovies = active.keys.where((url) {
+          final meta = DownloadsManager().activeMetadata[url];
+          if (meta == null || meta.showTitle != null) return false;
+          return !_movies.any((m) => m.title == meta.title);
+        }).toList();
+
+        return ListView.separated(
+          itemCount: _movies.length + activeMovies.length,
+          separatorBuilder: (context, index) => Divider(color: Colors.grey.withOpacity(0.2)),
+          itemBuilder: (context, index) {
+            if (index < activeMovies.length) {
+              final url = activeMovies[index];
+              final progress = active[url]!;
+              final meta = DownloadsManager().activeMetadata[url]!;
+              return ListTile(
+                leading: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    if (meta.localPosterPath.isNotEmpty && File(meta.localPosterPath).existsSync())
+                       ClipRRect(borderRadius: BorderRadius.circular(4), child: Image.file(File(meta.localPosterPath), width: 50, height: 75, fit: BoxFit.cover)),
+                    Container(width: 50, height: 75, color: Colors.black45),
+                    CircularProgressIndicator(value: progress, color: const Color(0xFF8A2BE2)),
+                    IconButton(icon: const Icon(Icons.stop, size: 18, color: Colors.white), onPressed: () => DownloadsManager().stopDownload(url)),
+                  ],
+                ),
+                title: Text(meta.title, style: const TextStyle(color: Colors.white)),
+                subtitle: const Text("Downloading...", style: TextStyle(color: Color(0xFF8A2BE2), fontWeight: FontWeight.bold)),
+              );
+            }
+            final item = _movies[index - activeMovies.length];
+            return Dismissible(
+              key: Key(item.localVideoPath),
+              direction: DismissDirection.endToStart,
+              confirmDismiss: (dir) => _showDeleteConfirmation(context, item.title),
+              onDismissed: (dir) async {
+                await DownloadsManager().deleteDownload(item);
+                _loadDownloads();
+              },
+              background: Container(
+                color: Colors.redAccent,
+                alignment: Alignment.centerRight,
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: const Icon(Icons.delete, color: Colors.white),
+              ),
+              child: ListTile(
+                leading: ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: item.localPosterPath.isNotEmpty && File(item.localPosterPath).existsSync()
+                      ? Image.file(File(item.localPosterPath), width: 50, height: 75, fit: BoxFit.cover)
+                      : Container(width: 50, height: 75, color: Colors.grey[900], child: const Icon(Icons.movie, color: Colors.white24)),
+                ),
+                title: Text(item.title, style: const TextStyle(color: Colors.white)),
+                subtitle: Row(
+                  children: [
+                    Text(item.duration, style: const TextStyle(color: Colors.white54, fontSize: 12)),
+                    if (item.localSubtitlePaths.isNotEmpty) ...[
+                      const SizedBox(width: 10),
+                      const Icon(Icons.subtitles, size: 14, color: Colors.grey),
+                    ]
+                  ],
+                ),
+                onTap: () => _playOffline(item),
+              ),
+            );
+          },
+        );
+      }
+    );
+  }
+
+  Widget _buildTvShowsList() {
+    final showTitles = _tvShows.keys.toList();
+    return ListView.separated(
+      itemCount: showTitles.length,
+      separatorBuilder: (context, index) => Divider(color: Colors.grey.withOpacity(0.2)),
+      itemBuilder: (context, index) {
+        final title = showTitles[index];
+        final episodes = _tvShows[title]!;
+        return Dismissible(
+          key: Key(title),
+          direction: DismissDirection.endToStart,
+          confirmDismiss: (dir) => _showDeleteConfirmation(context, title),
+          onDismissed: (dir) async {
+            await DownloadsManager().deleteShow(title);
+            _loadDownloads();
+          },
+          background: Container(
+            color: Colors.redAccent,
+            alignment: Alignment.centerRight,
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            child: const Icon(Icons.delete, color: Colors.white),
+          ),
+          child: ListTile(
+            leading: ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: episodes.first.localPosterPath.isNotEmpty && File(episodes.first.localPosterPath).existsSync()
+                  ? Image.file(File(episodes.first.localPosterPath), width: 50, height: 75, fit: BoxFit.cover)
+                  : Container(width: 50, height: 75, color: Colors.grey[900], child: const Icon(Icons.tv, color: Colors.white24)),
+            ),
+            title: Text(title, style: const TextStyle(color: Colors.white)),
+            subtitle: Text("${episodes.length} episodes downloaded", style: const TextStyle(color: Colors.white54, fontSize: 12)),
+            trailing: const Icon(Icons.arrow_forward_ios, color: Color(0xFF8A2BE2), size: 16),
+            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => OfflineTvShowDetailScreen(showTitle: title, episodes: episodes, onRefresh: _loadDownloads))),
+          ),
+        );
+      },
+    );
+  }
+
+  void _playOffline(DownloadItem item) {
+    Navigator.push(context, MaterialPageRoute(builder: (context) => VideoPlayerScreen(videoUrl: item.localVideoPath, subtitleUrls: item.localSubtitlePaths, title: item.title, serverIp: '', serverPort: '', username: '', password: '', fileSize: 0)));
+  }
+}
+
+class OfflineTvShowDetailScreen extends StatefulWidget {
+  final String showTitle;
+  final List<DownloadItem> episodes;
+  final VoidCallback onRefresh;
+
+  const OfflineTvShowDetailScreen({super.key, required this.showTitle, required this.episodes, required this.onRefresh});
+
+  @override
+  State<OfflineTvShowDetailScreen> createState() => _OfflineTvShowDetailScreenState();
+}
+
+class _OfflineTvShowDetailScreenState extends State<OfflineTvShowDetailScreen> {
+  late List<DownloadItem> _currentEpisodes;
+  String? _selectedSeason;
+  StreamSubscription? _progressSubscription;
+
+  @override
+  void initState() {
+    super.initState();
+    _currentEpisodes = List.from(widget.episodes);
+    if (_currentEpisodes.isNotEmpty) {
+      _selectedSeason = _currentEpisodes.first.seasonName ?? "Season 1";
+    }
+    _progressSubscription = DownloadsManager().progressController.stream.listen((_) {
+      _refreshLibrary();
+    });
+  }
+
+  @override
+  void dispose() {
+    _progressSubscription?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _refreshLibrary() async {
+    final items = await DownloadsManager().getDownloads();
+    if (mounted) {
+      setState(() {
+        _currentEpisodes = items.where((i) => i.showTitle == widget.showTitle).toList();
+        if (_currentEpisodes.isEmpty) {
+          Navigator.pop(context);
+        } else if (_selectedSeason == null || !_currentEpisodes.any((e) => e.seasonName == _selectedSeason)) {
+          _selectedSeason = _currentEpisodes.first.seasonName ?? "Season 1";
+        }
+      });
+      widget.onRefresh();
+    }
+  }
+
+  Future<bool?> _showDeleteConfirmation(BuildContext context, String title) {
+    return showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Colors.grey[900],
+        title: const Text("Confirm Delete", style: TextStyle(color: Colors.white)),
+        content: Text("Are you sure you want to delete '$title'?", style: const TextStyle(color: Colors.white70)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text("Cancel", style: TextStyle(color: Colors.grey))),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text("Yes", style: TextStyle(color: Colors.redAccent))),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<Map<String, double>>(
+      stream: DownloadsManager().progressController.stream,
+      builder: (context, snapshot) {
+        final active = snapshot.data ?? {};
+        final activeEpisodes = active.keys
+            .map((url) => DownloadsManager().activeMetadata[url])
+            .where((meta) => meta != null && meta.showTitle == widget.showTitle)
+            .toList();
+
+        final allEpisodes = [..._currentEpisodes, ...activeEpisodes.cast<DownloadItem>()];
+        
+        Map<String, List<dynamic>> seasons = {};
+        for (var ep in allEpisodes) {
+          seasons.putIfAbsent(ep.seasonName ?? "Season 1", () => []).add(ep);
+        }
+        final seasonNames = seasons.keys.toList();
+        final posterPath = _currentEpisodes.isNotEmpty ? _currentEpisodes.first.localPosterPath : "";
+
+        return Scaffold(
+          backgroundColor: Colors.black,
+          extendBodyBehindAppBar: true,
+          appBar: AppBar(backgroundColor: Colors.transparent, elevation: 0),
+          body: Stack(
+            children: [
+              if (posterPath.isNotEmpty && File(posterPath).existsSync())
+                Positioned.fill(child: Image.file(File(posterPath), fit: BoxFit.cover)),
+              Positioned.fill(child: BackdropFilter(filter: ImageFilter.blur(sigmaX: 40, sigmaY: 40), child: Container(color: Colors.black.withOpacity(0.1)))),
+              Column(
+                children: [
+                  const SizedBox(height: 100),
+                  Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Row(
+                      children: [
+                        ClipRRect(borderRadius: BorderRadius.circular(8), child: posterPath.isNotEmpty && File(posterPath).existsSync() ? Image.file(File(posterPath), height: 150, width: 100, fit: BoxFit.cover) : Container(height: 150, width: 100, color: Colors.grey[900])),
+                        const SizedBox(width: 16),
+                        Expanded(child: Text(widget.showTitle, style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold))),
+                      ],
+                    ),
+                  ),
+                  if (seasonNames.isNotEmpty)
+                    Container(
+                      height: 50,
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: ListView.builder(
+                        scrollDirection: Axis.horizontal,
+                        itemCount: seasonNames.length,
+                        itemBuilder: (context, index) {
+                          final isSelected = _selectedSeason == seasonNames[index];
+                          return Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 4),
+                            child: ElevatedButton(
+                              onPressed: () => setState(() => _selectedSeason = seasonNames[index]),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: isSelected ? const Color(0xFF8A2BE2) : Colors.grey[800],
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                              ),
+                              child: Text(seasonNames[index], style: TextStyle(color: isSelected ? Colors.white : Colors.grey[300])),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  Expanded(
+                    child: GridView.builder(
+                      padding: const EdgeInsets.all(16),
+                      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 2, childAspectRatio: 16 / 9, crossAxisSpacing: 10, mainAxisSpacing: 10),
+                      itemCount: seasons[_selectedSeason]?.length ?? 0,
+                      itemBuilder: (context, i) {
+                        final ep = seasons[_selectedSeason]![i];
+                        final isDownloading = active.keys.any((url) => DownloadsManager().activeMetadata[url]?.localVideoPath == ep.localVideoPath);
+                        final downloadUrl = active.keys.firstWhere((url) => DownloadsManager().activeMetadata[url]?.localVideoPath == ep.localVideoPath, orElse: () => "");
+
+                        return Dismissible(
+                          key: Key(ep.localVideoPath),
+                          direction: DismissDirection.vertical,
+                          confirmDismiss: (dir) => isDownloading ? Future.value(false) : _showDeleteConfirmation(context, ep.title),
+                          onDismissed: (dir) async {
+                            await DownloadsManager().deleteDownload(ep);
+                            _refreshLibrary();
+                          },
+                          background: Container(color: Colors.redAccent, child: const Icon(Icons.delete, color: Colors.white)),
+                          child: GestureDetector(
+                            onTap: isDownloading ? null : () => Navigator.push(context, MaterialPageRoute(builder: (context) => VideoPlayerScreen(videoUrl: ep.localVideoPath, subtitleUrls: ep.localSubtitlePaths, title: ep.title, serverIp: '', serverPort: '', username: '', password: '', fileSize: 0))),
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(8),
+                              child: Stack(
+                                fit: StackFit.expand,
+                                children: [
+                                  ep.episodeThumbnailPath != null && File(ep.episodeThumbnailPath!).existsSync()
+                                      ? Image.file(File(ep.episodeThumbnailPath!), fit: BoxFit.cover)
+                                      : Container(color: Colors.grey[900], child: const Icon(Icons.play_circle_fill, color: Colors.white54, size: 40)),
+                                  if (isDownloading) ...[
+                                    Container(color: Colors.black54),
+                                    Center(
+                                      child: Stack(
+                                        alignment: Alignment.center,
+                                        children: [
+                                          CircularProgressIndicator(value: active[downloadUrl], color: const Color(0xFF8A2BE2)),
+                                          IconButton(icon: const Icon(Icons.stop, size: 14, color: Colors.white), onPressed: () => DownloadsManager().stopDownload(downloadUrl)),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                  Positioned(
+                                    bottom: 0, left: 0, right: 0,
+                                    child: Container(
+                                      padding: const EdgeInsets.all(4),
+                                      color: Colors.black54,
+                                      child: Row(
+                                        children: [
+                                          Expanded(child: Text(ep.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 10))),
+                                          if (isDownloading) const Text("DL", style: TextStyle(color: Color(0xFF8A2BE2), fontSize: 8, fontWeight: FontWeight.bold))
+                                          else if (ep.localSubtitlePaths.isNotEmpty) const Icon(Icons.subtitles, size: 12, color: Colors.white70),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        );
+      }
+    );
+  }
+}
