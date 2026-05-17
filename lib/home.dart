@@ -79,10 +79,13 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       vsync: this,
       duration: const Duration(milliseconds: 1500),
     )..repeat();
+    
     _refreshData();
+
     _downloadSubscription = DownloadsManager().progressController.stream.listen((_) {
       _loadDownloadedPaths();
     });
+
     _searchController.addListener(() {
       if (_searchController.text.isEmpty && _isSearching) {
         setState(() {
@@ -661,6 +664,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
+      extendBodyBehindAppBar: false,
       appBar: AppBar(
         backgroundColor: Colors.black.withOpacity(0.5),
         elevation: 0,

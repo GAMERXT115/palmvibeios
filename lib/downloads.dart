@@ -386,41 +386,71 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
   }
 
   Widget _buildTvShowsList() {
-    final showTitles = _tvShows.keys.toList();
-    return ListView.separated(
-      itemCount: showTitles.length,
-      separatorBuilder: (context, index) => Divider(color: Colors.grey.withOpacity(0.2)),
-      itemBuilder: (context, index) {
-        final title = showTitles[index];
-        final episodes = _tvShows[title]!;
-        return Dismissible(
-          key: Key(title),
-          direction: DismissDirection.endToStart,
-          confirmDismiss: (dir) => _showDeleteConfirmation(context, title),
-          onDismissed: (dir) async {
-            await DownloadsManager().deleteShow(title);
-            _loadDownloads();
+    return StreamBuilder<Map<String, double>>(
+      stream: DownloadsManager().progressController.stream,
+      builder: (context, snapshot) {
+        final active = snapshot.data ?? {};
+        final activeShows = active.keys
+            .map((url) => DownloadsManager().activeMetadata[url])
+            .where((meta) => meta != null && meta.showTitle != null)
+            .map((meta) => meta!.showTitle!)
+            .toSet();
+
+        final allShowTitles = {..._tvShows.keys, ...activeShows}.toList()..sort();
+
+        return ListView.separated(
+          itemCount: allShowTitles.length,
+          separatorBuilder: (context, index) => Divider(color: Colors.grey.withOpacity(0.2)),
+          itemBuilder: (context, index) {
+            final title = allShowTitles[index];
+            final episodes = _tvShows[title] ?? [];
+            final isActive = activeShows.contains(title);
+            final firstItem = isActive 
+                ? DownloadsManager().activeMetadata.values.firstWhere((m) => m.showTitle == title)
+                : episodes.first;
+
+            return Dismissible(
+              key: Key(title),
+              direction: DismissDirection.endToStart,
+              confirmDismiss: (dir) => _showDeleteConfirmation(context, title),
+              onDismissed: (dir) async {
+                await DownloadsManager().deleteShow(title);
+                _loadDownloads();
+              },
+              background: Container(
+                color: Colors.redAccent,
+                alignment: Alignment.centerRight,
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: const Icon(Icons.delete, color: Colors.white),
+              ),
+              child: ListTile(
+                leading: ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: firstItem.localPosterPath.isNotEmpty && File(firstItem.localPosterPath).existsSync()
+                      ? Image.file(File(firstItem.localPosterPath), width: 50, height: 75, fit: BoxFit.cover)
+                      : Container(width: 50, height: 75, color: Colors.grey[900], child: const Icon(Icons.tv, color: Colors.white24)),
+                ),
+                title: Text(title, style: const TextStyle(color: Colors.white)),
+                subtitle: Text(
+                  isActive ? "Downloading episodes..." : "${episodes.length} episodes downloaded",
+                  style: TextStyle(color: isActive ? const Color(0xFF8A2BE2) : Colors.white54, fontSize: 12),
+                ),
+                trailing: const Icon(Icons.arrow_forward_ios, color: Color(0xFF8A2BE2), size: 16),
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => OfflineTvShowDetailScreen(
+                      showTitle: title,
+                      episodes: episodes,
+                      onRefresh: _loadDownloads,
+                    ),
+                  ),
+                ),
+              ),
+            );
           },
-          background: Container(
-            color: Colors.redAccent,
-            alignment: Alignment.centerRight,
-            padding: const EdgeInsets.symmetric(horizontal: 20),
-            child: const Icon(Icons.delete, color: Colors.white),
-          ),
-          child: ListTile(
-            leading: ClipRRect(
-              borderRadius: BorderRadius.circular(4),
-              child: episodes.first.localPosterPath.isNotEmpty && File(episodes.first.localPosterPath).existsSync()
-                  ? Image.file(File(episodes.first.localPosterPath), width: 50, height: 75, fit: BoxFit.cover)
-                  : Container(width: 50, height: 75, color: Colors.grey[900], child: const Icon(Icons.tv, color: Colors.white24)),
-            ),
-            title: Text(title, style: const TextStyle(color: Colors.white)),
-            subtitle: Text("${episodes.length} episodes downloaded", style: const TextStyle(color: Colors.white54, fontSize: 12)),
-            trailing: const Icon(Icons.arrow_forward_ios, color: Color(0xFF8A2BE2), size: 16),
-            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => OfflineTvShowDetailScreen(showTitle: title, episodes: episodes, onRefresh: _loadDownloads))),
-          ),
         );
-      },
+      }
     );
   }
 
@@ -449,12 +479,21 @@ class _OfflineTvShowDetailScreenState extends State<OfflineTvShowDetailScreen> {
   void initState() {
     super.initState();
     _currentEpisodes = List.from(widget.episodes);
-    if (_currentEpisodes.isNotEmpty) {
-      _selectedSeason = _currentEpisodes.first.seasonName ?? "Season 1";
-    }
+    _updateSelectedSeason();
     _progressSubscription = DownloadsManager().progressController.stream.listen((_) {
       _refreshLibrary();
     });
+  }
+
+  void _updateSelectedSeason() {
+    if (_currentEpisodes.isNotEmpty && _selectedSeason == null) {
+      _selectedSeason = _currentEpisodes.first.seasonName ?? "Season 1";
+    } else if (_currentEpisodes.isEmpty) {
+      final active = DownloadsManager().activeMetadata.values.where((m) => m.showTitle == widget.showTitle).toList();
+      if (active.isNotEmpty && _selectedSeason == null) {
+        _selectedSeason = active.first.seasonName ?? "Season 1";
+      }
+    }
   }
 
   @override
@@ -468,11 +507,7 @@ class _OfflineTvShowDetailScreenState extends State<OfflineTvShowDetailScreen> {
     if (mounted) {
       setState(() {
         _currentEpisodes = items.where((i) => i.showTitle == widget.showTitle).toList();
-        if (_currentEpisodes.isEmpty) {
-          Navigator.pop(context);
-        } else if (_selectedSeason == null || !_currentEpisodes.any((e) => e.seasonName == _selectedSeason)) {
-          _selectedSeason = _currentEpisodes.first.seasonName ?? "Season 1";
-        }
+        _updateSelectedSeason();
       });
       widget.onRefresh();
     }
@@ -499,19 +534,27 @@ class _OfflineTvShowDetailScreenState extends State<OfflineTvShowDetailScreen> {
       stream: DownloadsManager().progressController.stream,
       builder: (context, snapshot) {
         final active = snapshot.data ?? {};
-        final activeEpisodes = active.keys
-            .map((url) => DownloadsManager().activeMetadata[url])
-            .where((meta) => meta != null && meta.showTitle == widget.showTitle)
+        final activeEpisodes = DownloadsManager().activeMetadata.entries
+            .where((entry) => entry.value.showTitle == widget.showTitle)
             .toList();
 
-        final allEpisodes = [..._currentEpisodes, ...activeEpisodes.cast<DownloadItem>()];
+        final List<dynamic> allEpisodes = [..._currentEpisodes];
+        for (var entry in activeEpisodes) {
+          if (!_currentEpisodes.any((e) => e.localVideoPath == entry.value.localVideoPath)) {
+            allEpisodes.add(entry);
+          }
+        }
         
         Map<String, List<dynamic>> seasons = {};
         for (var ep in allEpisodes) {
-          seasons.putIfAbsent(ep.seasonName ?? "Season 1", () => []).add(ep);
+          final item = ep is MapEntry<String, DownloadItem> ? ep.value : ep as DownloadItem;
+          seasons.putIfAbsent(item.seasonName ?? "Season 1", () => []).add(ep);
         }
-        final seasonNames = seasons.keys.toList();
-        final posterPath = _currentEpisodes.isNotEmpty ? _currentEpisodes.first.localPosterPath : "";
+        
+        final seasonNames = seasons.keys.toList()..sort();
+        final posterPath = _currentEpisodes.isNotEmpty 
+            ? _currentEpisodes.first.localPosterPath 
+            : (activeEpisodes.isNotEmpty ? activeEpisodes.first.value.localPosterPath : "");
 
         return Scaffold(
           backgroundColor: Colors.black,
@@ -564,58 +607,73 @@ class _OfflineTvShowDetailScreenState extends State<OfflineTvShowDetailScreen> {
                       gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 2, childAspectRatio: 16 / 9, crossAxisSpacing: 10, mainAxisSpacing: 10),
                       itemCount: seasons[_selectedSeason]?.length ?? 0,
                       itemBuilder: (context, i) {
-                        final ep = seasons[_selectedSeason]![i];
-                        final isDownloading = active.keys.any((url) => DownloadsManager().activeMetadata[url]?.localVideoPath == ep.localVideoPath);
-                        final downloadUrl = active.keys.firstWhere((url) => DownloadsManager().activeMetadata[url]?.localVideoPath == ep.localVideoPath, orElse: () => "");
+                        final dynamic entry = seasons[_selectedSeason]![i];
+                        final bool isDownloading = entry is MapEntry<String, DownloadItem>;
+                        final DownloadItem ep = isDownloading ? entry.value : entry as DownloadItem;
+                        final String downloadUrl = isDownloading ? entry.key : "";
 
-                        return Dismissible(
-                          key: Key(ep.localVideoPath),
-                          direction: DismissDirection.vertical,
-                          confirmDismiss: (dir) => isDownloading ? Future.value(false) : _showDeleteConfirmation(context, ep.title),
-                          onDismissed: (dir) async {
-                            await DownloadsManager().deleteDownload(ep);
-                            _refreshLibrary();
-                          },
-                          background: Container(color: Colors.redAccent, child: const Icon(Icons.delete, color: Colors.white)),
-                          child: GestureDetector(
-                            onTap: isDownloading ? null : () => Navigator.push(context, MaterialPageRoute(builder: (context) => VideoPlayerScreen(videoUrl: ep.localVideoPath, subtitleUrls: ep.localSubtitlePaths, title: ep.title, serverIp: '', serverPort: '', username: '', password: '', fileSize: 0))),
-                            child: ClipRRect(
-                              borderRadius: BorderRadius.circular(8),
-                              child: Stack(
-                                fit: StackFit.expand,
-                                children: [
-                                  ep.episodeThumbnailPath != null && File(ep.episodeThumbnailPath!).existsSync()
-                                      ? Image.file(File(ep.episodeThumbnailPath!), fit: BoxFit.cover)
-                                      : Container(color: Colors.grey[900], child: const Icon(Icons.play_circle_fill, color: Colors.white54, size: 40)),
-                                  if (isDownloading) ...[
-                                    Container(color: Colors.black54),
-                                    Center(
-                                      child: Stack(
-                                        alignment: Alignment.center,
-                                        children: [
-                                          CircularProgressIndicator(value: active[downloadUrl], color: const Color(0xFF8A2BE2)),
-                                          IconButton(icon: const Icon(Icons.stop, size: 14, color: Colors.white), onPressed: () => DownloadsManager().stopDownload(downloadUrl)),
-                                        ],
-                                      ),
-                                    ),
-                                  ],
-                                  Positioned(
-                                    bottom: 0, left: 0, right: 0,
-                                    child: Container(
-                                      padding: const EdgeInsets.all(4),
-                                      color: Colors.black54,
-                                      child: Row(
-                                        children: [
-                                          Expanded(child: Text(ep.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 10))),
-                                          if (isDownloading) const Text("DL", style: TextStyle(color: Color(0xFF8A2BE2), fontSize: 8, fontWeight: FontWeight.bold))
-                                          else if (ep.localSubtitlePaths.isNotEmpty) const Icon(Icons.subtitles, size: 12, color: Colors.white70),
-                                        ],
-                                      ),
+                        return ClipRRect(
+                          borderRadius: BorderRadius.circular(8),
+                          child: Stack(
+                            fit: StackFit.expand,
+                            children: [
+                              ep.episodeThumbnailPath != null && File(ep.episodeThumbnailPath!).existsSync()
+                                  ? Image.file(File(ep.episodeThumbnailPath!), fit: BoxFit.cover)
+                                  : Container(color: Colors.grey[900], child: const Icon(Icons.play_circle_fill, color: Colors.white54, size: 40)),
+                              if (isDownloading) ...[
+                                Container(color: Colors.black54),
+                                Center(
+                                  child: Stack(
+                                    alignment: Alignment.center,
+                                    children: [
+                                      CircularProgressIndicator(value: active[downloadUrl], color: const Color(0xFF8A2BE2)),
+                                      IconButton(icon: const Icon(Icons.stop, size: 14, color: Colors.white), onPressed: () => DownloadsManager().stopDownload(downloadUrl)),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                              if (!isDownloading)
+                                Positioned.fill(
+                                  child: Material(
+                                    color: Colors.transparent,
+                                    child: InkWell(
+                                      onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => VideoPlayerScreen(videoUrl: ep.localVideoPath, subtitleUrls: ep.localSubtitlePaths, title: ep.title, serverIp: '', serverPort: '', username: '', password: '', fileSize: 0))),
                                     ),
                                   ),
-                                ],
+                                ),
+                              Positioned(
+                                bottom: 0, left: 0, right: 0,
+                                child: Container(
+                                  padding: const EdgeInsets.all(4),
+                                  color: Colors.black54,
+                                  child: Row(
+                                    children: [
+                                      Expanded(child: Text(ep.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 10))),
+                                      if (isDownloading) const Text("DL", style: TextStyle(color: Color(0xFF8A2BE2), fontSize: 8, fontWeight: FontWeight.bold))
+                                      else if (ep.localSubtitlePaths.isNotEmpty) const Icon(Icons.subtitles, size: 12, color: Colors.white70),
+                                    ],
+                                  ),
+                                ),
                               ),
-                            ),
+                              if (!isDownloading)
+                                Positioned(
+                                  top: 5, right: 5,
+                                  child: GestureDetector(
+                                    onTap: () async {
+                                      final confirm = await _showDeleteConfirmation(context, ep.title);
+                                      if (confirm == true) {
+                                        await DownloadsManager().deleteDownload(ep);
+                                        _refreshLibrary();
+                                      }
+                                    },
+                                    child: Container(
+                                      padding: const EdgeInsets.all(4),
+                                      decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(4)),
+                                      child: const Icon(Icons.delete, color: Colors.redAccent, size: 16),
+                                    ),
+                                  ),
+                                ),
+                            ],
                           ),
                         );
                       },

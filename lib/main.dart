@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'login.dart';
+import 'splash_screen.dart';
 
 class CustomHttpOverrides extends HttpOverrides {
   @override
@@ -79,7 +80,7 @@ class _PalmVibeAppState extends State<PalmVibeApp> {
           brightness: Brightness.dark,
         ),
       ),
-      home: const LoginPage(),
+      home: const SplashScreen(nextScreen: LoginPage()),
     );
   }
 }

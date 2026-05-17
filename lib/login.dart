@@ -335,31 +335,53 @@ class _LoginPageState extends State<LoginPage> {
     final prefs = await SharedPreferences.getInstance();
     final lastIp = prefs.getString('server_ip') ?? '';
     final controller = TextEditingController(text: lastIp);
+    final DateTime openTime = DateTime.now();
     
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Enter Server IP'),
-        content: TextField(
-          controller: controller,
-          decoration: const InputDecoration(hintText: "192.168.x.x"),
-          keyboardType: TextInputType.url,
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-          TextButton(
-            onPressed: () async {
-              final newIp = controller.text.trim();
-              if (newIp.isNotEmpty) {
-                await prefs.setString('server_ip', newIp);
-                setState(() => _serverIP = newIp);
-                _fetchServerMessage();
-              }
-              Navigator.pop(context);
-            },
-            child: const Text('Save'),
+      barrierDismissible: false,
+      builder: (context) => GestureDetector(
+        onTap: () {
+          if (DateTime.now().difference(openTime).inSeconds >= 1) {
+            Navigator.pop(context);
+          }
+        },
+        child: Material(
+          color: Colors.transparent,
+          child: Center(
+            child: GestureDetector(
+              onTap: () {},
+              child: AlertDialog(
+                title: const Text('Enter Server IP'),
+                content: TextField(
+                  controller: controller,
+                  decoration: const InputDecoration(hintText: "192.168.x.x"),
+                  keyboardType: TextInputType.url,
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(context), 
+                    child: const Text('Cancel')
+                  ),
+                  TextButton(
+                    onPressed: () async {
+                      final newIp = controller.text.trim();
+                      await prefs.setString('server_ip', newIp);
+                      setState(() => _serverIP = newIp);
+                      Navigator.pop(context);
+                      if (newIp.isNotEmpty) {
+                        _fetchServerMessage();
+                      } else {
+                        _fetchServerInfoFromFirebase();
+                      }
+                    },
+                    child: const Text('Save'),
+                  ),
+                ],
+              ),
+            ),
           ),
-        ],
+        ),
       ),
     );
   }
