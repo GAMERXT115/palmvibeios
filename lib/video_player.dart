@@ -7,7 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:video_player/video_player.dart';
 import 'package:chewie/chewie.dart';
-import 'package:path/path.dart' as path;
+import 'package:path/path.dart' as p;
 import 'package:http/http.dart' as http;
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -186,7 +186,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
   Timer? _subtitleTimer;
   Timer? _progressSaveTimer;
   double _scale = 1.0;
-  double _baseScale = 1.0;
 
   late AnimationController _controlsAnimationController;
   late Animation<double> _controlsOpacity;
@@ -236,7 +235,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
 
   Future<void> _initializePlayer() async {
     try {
-      final bool isLocal = widget.videoUrl.startsWith('/') || widget.videoUrl.startsWith('file://');
+      final bool isLocal = !widget.videoUrl.startsWith('http');
 
       if (isLocal) {
         String cleanPath = widget.videoUrl;
@@ -245,7 +244,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
         
         final file = File(cleanPath);
         if (!await file.exists()) {
-          throw Exception("File not found at: $cleanPath");
+          throw Exception("Local file not found");
         }
         _videoPlayerController = VideoPlayerController.file(file);
       } else {
@@ -374,7 +373,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
 
   Future<void> _loadSubtitles(String url) async {
     try {
-      final bool isLocal = url.startsWith('/') || url.startsWith('file://');
+      final bool isLocal = !url.startsWith('http');
       String content = '';
 
       if (isLocal) {
@@ -571,12 +570,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
                       ],
                     )
                   : (_videoPlayerController != null && _videoPlayerController!.value.isInitialized)
-                      ? Transform.scale(
-                          scale: _scale,
-                          child: AspectRatio(
-                            aspectRatio: _videoPlayerController!.value.aspectRatio,
-                            child: VideoPlayer(_videoPlayerController!),
-                          ),
+                      ? AspectRatio(
+                          aspectRatio: _videoPlayerController!.value.aspectRatio,
+                          child: VideoPlayer(_videoPlayerController!),
                         )
                       : const CircularProgressIndicator(color: Color(0xFF8A2BE2)),
             ),
@@ -741,11 +737,12 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
   }
 
   void _showSubtitlePicker() async {
-    final bool isLocal = widget.videoUrl.startsWith('/') || widget.videoUrl.startsWith('file://');
+    final bool isLocal = !widget.videoUrl.startsWith('http');
     if (isLocal) {
       String cleanPath = widget.videoUrl;
       if (cleanPath.contains('?')) cleanPath = cleanPath.split('?')[0];
-      final dir = Directory(path.dirname(cleanPath));
+      final dir = Directory(p.dirname(cleanPath));
+      if (!await dir.exists()) return;
       final files = dir.listSync().where((f) => f.path.endsWith('.srt')).toList();
       showDialog(
         context: context,
@@ -760,13 +757,46 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
               itemBuilder: (context, i) {
                 if (i == 0) return ListTile(title: const Text('None', style: TextStyle(color: Colors.white)), onTap: () { setState(() => _subtitles.clear()); Navigator.pop(context); });
                 final s = files[i - 1];
-                return ListTile(title: Text(path.basename(s.path), style: const TextStyle(color: Colors.white)), onTap: () { _loadSubtitles(s.path); Navigator.pop(context); });
+                return ListTile(title: Text(p.basename(s.path), style: const TextStyle(color: Colors.white)), onTap: () { _loadSubtitles(s.path); Navigator.pop(context); });
               },
             ),
           ),
         ),
       );
       return;
+    }
+
+    final auth = 'Basic ${base64Encode(utf8.encode('${widget.username}:${widget.password}'))}';
+    final videoPath = Uri.parse(widget.videoUrl).queryParameters['path'] ?? '';
+    final response = await http.get(
+      Uri.parse('http://${widget.serverIp}:${widget.serverPort}/api/find-subtitles?path=${Uri.encodeComponent(videoPath)}'),
+      headers: {'Authorization': auth, 'ngrok-skip-browser-warning': 'true'},
+    );
+
+    if (response.statusCode == 200) {
+      final data = json.decode(response.body);
+      if (data['success'] == true) {
+        final subs = List<Map<String, dynamic>>.from(data['subtitles']);
+        showDialog(
+          context: context,
+          builder: (context) => AlertDialog(
+            backgroundColor: const Color(0xFF111111),
+            title: const Text('Subtitles', style: TextStyle(color: Colors.white)),
+            content: SizedBox(
+              width: double.maxFinite,
+              child: ListView.builder(
+                shrinkWrap: true,
+                itemCount: subs.length + 1,
+                itemBuilder: (context, i) {
+                  if (i == 0) return ListTile(title: const Text('None', style: TextStyle(color: Colors.white)), onTap: () { setState(() => _subtitles.clear()); Navigator.pop(context); });
+                  final s = subs[i - 1];
+                  return ListTile(title: Text(s['name'], style: const TextStyle(color: Colors.white)), onTap: () { _loadSubtitles('http://${widget.serverIp}:${widget.serverPort}/api/subtitle?path=${Uri.encodeComponent(s['path'])}'); Navigator.pop(context); });
+                },
+              ),
+            ),
+          ),
+        );
+      }
     }
   }
 

@@ -78,14 +78,15 @@ class DownloadsManager {
     try {
       final dir = await getApplicationDocumentsDirectory();
       final folderName = showTitle ?? title;
-      final cleanFolderName = folderName.replaceAll(RegExp(r'[^\w\s]+'), '');
-      final saveDir = Directory('${dir.path}/downloads/$cleanFolderName');
+      final cleanShowName = folderName.replaceAll(RegExp(r'[^\w\s]+'), '');
+      final cleanSeasonName = (seasonName ?? "Single").replaceAll(RegExp(r'[^\w\s]+'), '');
+      final saveDir = Directory('${dir.path}/downloads/$cleanShowName/$cleanSeasonName');
       
       if (!await saveDir.exists()) {
         await saveDir.create(recursive: true);
       }
 
-      final posterPath = '${saveDir.path}/poster.jpg';
+      final posterPath = '${dir.path}/downloads/$cleanShowName/poster.jpg';
       if (!File(posterPath).existsSync()) {
         await _downloadStaticFile(posterUrl, posterPath, authHeader);
       }
@@ -212,6 +213,16 @@ class DownloadsManager {
 
     final vFile = File(item.localVideoPath);
     if (await vFile.exists()) await vFile.delete();
+
+    if (item.episodeThumbnailPath != null) {
+      final tFile = File(item.episodeThumbnailPath!);
+      if (await tFile.exists()) await tFile.delete();
+    }
+
+    for (var s in item.localSubtitlePaths) {
+      final sFile = File(s);
+      if (await sFile.exists()) await sFile.delete();
+    }
   }
 
   Future<void> deleteShow(String showTitle) async {
@@ -219,6 +230,11 @@ class DownloadsManager {
     final toDelete = downloads.where((i) => i.showTitle == showTitle).toList();
     for (var item in toDelete) {
       await deleteDownload(item);
+    }
+    final dir = await getApplicationDocumentsDirectory();
+    final showDir = Directory('${dir.path}/downloads/${showTitle.replaceAll(RegExp(r'[^\w\s]+'), '')}');
+    if (await showDir.exists()) {
+      await showDir.delete(recursive: true);
     }
   }
 
@@ -552,9 +568,15 @@ class _OfflineTvShowDetailScreenState extends State<OfflineTvShowDetailScreen> {
         }
         
         final seasonNames = seasons.keys.toList()..sort();
-        final posterPath = _currentEpisodes.isNotEmpty 
-            ? _currentEpisodes.first.localPosterPath 
-            : (activeEpisodes.isNotEmpty ? activeEpisodes.first.value.localPosterPath : "");
+        seasons.forEach((key, value) {
+          value.sort((a, b) {
+            final aItem = a is MapEntry<String, DownloadItem> ? a.value : a as DownloadItem;
+            final bItem = b is MapEntry<String, DownloadItem> ? b.value : b as DownloadItem;
+            return aItem.title.compareTo(bItem.title);
+          });
+        });
+
+        final posterPath = _currentEpisodes.isNotEmpty ? _currentEpisodes.first.localPosterPath : (activeEpisodes.isNotEmpty ? activeEpisodes.first.value.localPosterPath : "");
 
         return Scaffold(
           backgroundColor: Colors.black,
@@ -688,3 +710,4 @@ class _OfflineTvShowDetailScreenState extends State<OfflineTvShowDetailScreen> {
     );
   }
 }
+
