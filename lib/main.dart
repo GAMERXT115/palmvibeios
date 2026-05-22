@@ -120,6 +120,9 @@ class _PalmVibeAppState extends State<PalmVibeApp> {
         brightness: Brightness.dark,
         visualDensity: VisualDensity.adaptivePlatformDensity,
         useMaterial3: true,
+        snackBarTheme: const SnackBarThemeData(
+          contentTextStyle: TextStyle(color: Colors.white),
+        ),
         colorScheme: ColorScheme.fromSeed(
           seedColor: Colors.purple,
           brightness: Brightness.dark,

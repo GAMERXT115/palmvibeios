@@ -262,8 +262,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
           throw Exception("File not found: $cleanPath");
         }
 
-        _videoPlayerController = VideoPlayerController.file(
-          file,
+        _videoPlayerController = VideoPlayerController.networkUrl(
+          Uri.parse('file://$cleanPath'),
           videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
         );
       } else {
@@ -397,7 +397,11 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
       String content = '';
 
       if (isLocal) {
-        content = await File(url).readAsString();
+        String rawPath = url;
+        if (rawPath.startsWith('file://')) rawPath = rawPath.replaceFirst('file://', '');
+        if (rawPath.contains('?')) rawPath = rawPath.split('?')[0];
+        rawPath = Uri.decodeFull(rawPath);
+        content = await File(p.normalize(rawPath)).readAsString();
       } else {
         final auth = 'Basic ${base64Encode(utf8.encode('${widget.username}:${widget.password}'))}';
         final response = await http.get(Uri.parse(url), headers: {
