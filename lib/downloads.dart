@@ -67,6 +67,21 @@ class DownloadsManager {
   final Map<String, bool> cancelRequests = {};
   final StreamController<Map<String, double>> progressController = StreamController<Map<String, double>>.broadcast();
 
+  Future<String> get _localPath async {
+    final directory = await getApplicationDocumentsDirectory();
+    return directory.path;
+  }
+
+  Future<String> makeAbsolutePath(String relativePath) async {
+    if (relativePath.isEmpty) return "";
+    final base = await _localPath;
+    return path.join(base, relativePath);
+  }
+
+  String getRelativePath(String fullPath, String base) {
+    return path.relative(fullPath, from: base);
+  }
+
   Future<void> _showLocalNotification(String title, String body) async {
     const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
       'downloads',
@@ -75,18 +90,15 @@ class DownloadsManager {
       importance: Importance.max,
       priority: Priority.high,
     );
-
     const DarwinNotificationDetails iosDetails = DarwinNotificationDetails(
       presentAlert: true,
       presentBadge: true,
       presentSound: true,
     );
-
     const NotificationDetails platformDetails = NotificationDetails(
       android: androidDetails,
       iOS: iosDetails,
     );
-
     await flutterLocalNotificationsPlugin.show(
       DateTime.now().millisecond,
       title,
@@ -95,7 +107,7 @@ class DownloadsManager {
     );
   }
 
-  Future<void> startDownload({
+    Future<void> startDownload({
     required String videoUrl,
     required String title,
     required String posterUrl,
@@ -108,40 +120,30 @@ class DownloadsManager {
     String duration = "0:00",
   }) async {
     try {
-      final dir = await getApplicationDocumentsDirectory();
+      final baseDir = await _localPath;
       final folderName = showTitle ?? title;
       final cleanShowName = folderName.replaceAll(RegExp(r'[^\w\s]+'), '');
       final cleanSeasonName = (seasonName ?? "Single").replaceAll(RegExp(r'[^\w\s]+'), '');
-      final saveDir = Directory('${dir.path}/downloads/$cleanShowName/$cleanSeasonName');
+      final saveDir = Directory('$baseDir/downloads/$cleanShowName/$cleanSeasonName');
       
       if (!await saveDir.exists()) {
         await saveDir.create(recursive: true);
       }
 
-      final posterPath = '${dir.path}/downloads/$cleanShowName/poster.jpg';
-      if (!File(posterPath).existsSync()) {
-        await _downloadStaticFile(posterUrl, posterPath, authHeader);
+      final posterFullPath = '$baseDir/downloads/$cleanShowName/poster.jpg';
+      if (!File(posterFullPath).existsSync()) {
+        await _downloadStaticFile(posterUrl, posterFullPath, authHeader);
       }
 
-      String? thumbPath;
+      String? thumbRelativePath;
       if (episodeThumbnailUrl != null) {
-        thumbPath = '${saveDir.path}/${title.replaceAll(RegExp(r'[^\w\s]+'), '')}_thumb.jpg';
-        await _downloadStaticFile(episodeThumbnailUrl, thumbPath, authHeader);
+        final thumbFullPath = '${saveDir.path}/${title.replaceAll(RegExp(r'[^\w\s]+'), '')}_thumb.jpg';
+        await _downloadStaticFile(episodeThumbnailUrl, thumbFullPath, authHeader);
+        thumbRelativePath = getRelativePath(thumbFullPath, baseDir);
       }
 
       final videoExt = path.extension(Uri.parse(videoUrl).path).isEmpty ? ".mp4" : path.extension(Uri.parse(videoUrl).path);
-      final videoPath = '${saveDir.path}/${title.replaceAll(RegExp(r'[^\w\s]+'), '')}_video$videoExt';
-
-      activeMetadata[videoUrl] = DownloadItem(
-        title: title,
-        localVideoPath: videoPath,
-        localPosterPath: posterPath,
-        localSubtitlePaths: [],
-        duration: duration,
-        showTitle: showTitle,
-        seasonName: seasonName,
-        episodeThumbnailPath: thumbPath,
-      );
+      final videoFullPath = '${saveDir.path}/${title.replaceAll(RegExp(r'[^\w\s]+'), '')}_video$videoExt';
 
       downloadProgress[videoUrl] = 0.0;
       cancelRequests[videoUrl] = false;
@@ -158,7 +160,7 @@ class DownloadsManager {
       final total = response.contentLength ?? 0;
       int received = 0;
 
-      final file = File(videoPath);
+      final file = File(videoFullPath);
       final sink = file.openWrite();
 
       await for (var chunk in response.stream) {
@@ -179,34 +181,37 @@ class DownloadsManager {
 
       await sink.close();
 
-      List<String> localSubs = [];
+      List<String> localSubsRelative = [];
       for (int i = 0; i < subtitleUrls.length; i++) {
-        final sPath = '${saveDir.path}/${title.replaceAll(RegExp(r'[^\w\s]+'), '')}_sub_$i.srt';
-        await _downloadStaticFile(subtitleUrls[i], sPath, authHeader);
-        localSubs.add(sPath);
+        final sFullPath = '${saveDir.path}/${title.replaceAll(RegExp(r'[^\w\s]+'), '')}_sub_$i.srt';
+        await _downloadStaticFile(subtitleUrls[i], sFullPath, authHeader);
+        localSubsRelative.add(getRelativePath(sFullPath, baseDir));
       }
 
       final finalItem = DownloadItem(
         title: title,
-        localVideoPath: videoPath,
-        localPosterPath: posterPath,
-        localSubtitlePaths: localSubs,
+        localVideoPath: getRelativePath(videoFullPath, baseDir),
+        localPosterPath: getRelativePath(posterFullPath, baseDir),
+        localSubtitlePaths: localSubsRelative,
         duration: duration,
         showTitle: showTitle,
         seasonName: seasonName,
-        episodeThumbnailPath: thumbPath,
+        episodeThumbnailPath: thumbRelativePath,
       );
 
       await _saveMetadata(finalItem);
       _cleanupActive(videoUrl);
       onNotify('Download complete: $title');
-      await _showLocalNotification('Download Complete', title);
+      
+      if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
+        await _showLocalNotification('Download Complete', title);
+      }
     } catch (e) {
       _cleanupActive(videoUrl);
       onNotify('Download failed: $e');
-      await _showLocalNotification('Download Failed', title);
     }
   }
+
 
   void _cleanupActive(String url) {
     downloadProgress.remove(url);
@@ -230,34 +235,35 @@ class DownloadsManager {
 
   Future<void> _saveMetadata(DownloadItem item) async {
     final prefs = await SharedPreferences.getInstance();
-    List<String> list = prefs.getStringList('downloaded_content_v2') ?? [];
+    List<String> list = prefs.getStringList('downloaded_content_v3') ?? [];
     list.add(jsonEncode(item.toJson()));
-    await prefs.setStringList('downloaded_content_v2', list);
+    await prefs.setStringList('downloaded_content_v3', list);
     progressController.add({});
   }
 
   Future<List<DownloadItem>> getDownloads() async {
     final prefs = await SharedPreferences.getInstance();
-    List<String> list = prefs.getStringList('downloaded_content_v2') ?? [];
+    List<String> list = prefs.getStringList('downloaded_content_v3') ?? [];
     return list.map((e) => DownloadItem.fromJson(jsonDecode(e))).toList();
   }
 
   Future<void> deleteDownload(DownloadItem item) async {
+    final base = await _localPath;
     final prefs = await SharedPreferences.getInstance();
-    List<String> list = prefs.getStringList('downloaded_content_v2') ?? [];
+    List<String> list = prefs.getStringList('downloaded_content_v3') ?? [];
     list.removeWhere((e) => DownloadItem.fromJson(jsonDecode(e)).localVideoPath == item.localVideoPath);
-    await prefs.setStringList('downloaded_content_v2', list);
+    await prefs.setStringList('downloaded_content_v3', list);
 
-    final vFile = File(item.localVideoPath);
+    final vFile = File(path.join(base, item.localVideoPath));
     if (await vFile.exists()) await vFile.delete();
 
     if (item.episodeThumbnailPath != null) {
-      final tFile = File(item.episodeThumbnailPath!);
+      final tFile = File(path.join(base, item.episodeThumbnailPath!));
       if (await tFile.exists()) await tFile.delete();
     }
 
     for (var s in item.localSubtitlePaths) {
-      final sFile = File(s);
+      final sFile = File(path.join(base, s));
       if (await sFile.exists()) await sFile.delete();
     }
     progressController.add({});
@@ -269,8 +275,8 @@ class DownloadsManager {
     for (var item in toDelete) {
       await deleteDownload(item);
     }
-    final dir = await getApplicationDocumentsDirectory();
-    final showDir = Directory('${dir.path}/downloads/${showTitle.replaceAll(RegExp(r'[^\w\s]+'), '')}');
+    final base = await _localPath;
+    final showDir = Directory('$base/downloads/${showTitle.replaceAll(RegExp(r'[^\w\s]+'), '')}');
     if (await showDir.exists()) {
       await showDir.delete(recursive: true);
     }
@@ -289,7 +295,7 @@ class DownloadsScreen extends StatefulWidget {
   State<DownloadsScreen> createState() => _DownloadsScreenState();
 }
 
-class _DownloadsScreenState extends State<DownloadsScreen> {
+class _DownloadsScreenState extends State<DownloadsScreen> with RouteAware {
   List<DownloadItem> _movies = [];
   Map<String, List<DownloadItem>> _tvShows = {};
   bool _isLoading = true;
@@ -320,7 +326,12 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
     if (mounted) {
       setState(() {
         _movies = items.where((i) => i.showTitle == null).toList();
-        _movies.sort((a, b) => _extractNumber(a.title).compareTo(_extractNumber(b.title)));
+        _movies.sort((a, b) {
+          int numA = _extractNumber(a.title);
+          int numB = _extractNumber(b.title);
+          if (numA != numB) return numA.compareTo(numB);
+          return a.title.compareTo(b.title);
+        });
         
         _tvShows = {};
         for (var ep in items.where((i) => i.showTitle != null)) {
@@ -392,19 +403,24 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
               final url = activeMovies[index];
               final progress = active[url]!;
               final meta = DownloadsManager().activeMetadata[url]!;
-              return ListTile(
-                leading: Stack(
-                  alignment: Alignment.center,
-                  children: [
-                    if (meta.localPosterPath.isNotEmpty && File(meta.localPosterPath).existsSync())
-                       ClipRRect(borderRadius: BorderRadius.circular(4), child: Image.file(File(meta.localPosterPath), width: 50, height: 75, fit: BoxFit.cover)),
-                    Container(width: 50, height: 75, color: Colors.black45),
-                    CircularProgressIndicator(value: progress, color: const Color(0xFF8A2BE2)),
-                    IconButton(icon: const Icon(Icons.stop, size: 18, color: Colors.white), onPressed: () => DownloadsManager().stopDownload(url)),
-                  ],
-                ),
-                title: Text(meta.title, style: const TextStyle(color: Colors.white)),
-                subtitle: const Text("Downloading...", style: TextStyle(color: Color(0xFF8A2BE2), fontWeight: FontWeight.bold)),
+              return FutureBuilder<String>(
+                future: DownloadsManager().makeAbsolutePath(meta.localPosterPath),
+                builder: (context, pathSnap) {
+                  return ListTile(
+                    leading: Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        if (pathSnap.hasData && pathSnap.data!.isNotEmpty && File(pathSnap.data!).existsSync())
+                           ClipRRect(borderRadius: BorderRadius.circular(4), child: Image.file(File(pathSnap.data!), width: 50, height: 75, fit: BoxFit.cover)),
+                        Container(width: 50, height: 75, color: Colors.black45),
+                        CircularProgressIndicator(value: progress, color: const Color(0xFF8A2BE2)),
+                        IconButton(icon: const Icon(Icons.stop, size: 18, color: Colors.white), onPressed: () => DownloadsManager().stopDownload(url)),
+                      ],
+                    ),
+                    title: Text(meta.title, style: const TextStyle(color: Colors.white)),
+                    subtitle: const Text("Downloading...", style: TextStyle(color: Color(0xFF8A2BE2), fontWeight: FontWeight.bold)),
+                  );
+                }
               );
             }
             final item = _movies[index - activeMovies.length];
@@ -422,24 +438,29 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
                 padding: const EdgeInsets.symmetric(horizontal: 20),
                 child: const Icon(Icons.delete, color: Colors.white),
               ),
-              child: ListTile(
-                leading: ClipRRect(
-                  borderRadius: BorderRadius.circular(4),
-                  child: item.localPosterPath.isNotEmpty && File(item.localPosterPath).existsSync()
-                      ? Image.file(File(item.localPosterPath), width: 50, height: 75, fit: BoxFit.cover)
-                      : Container(width: 50, height: 75, color: Colors.grey[900], child: const Icon(Icons.movie, color: Colors.white24)),
-                ),
-                title: Text(item.title, style: const TextStyle(color: Colors.white)),
-                subtitle: Row(
-                  children: [
-                    Text(item.duration, style: const TextStyle(color: Colors.white54, fontSize: 12)),
-                    if (item.localSubtitlePaths.isNotEmpty) ...[
-                      const SizedBox(width: 10),
-                      const Icon(Icons.subtitles, size: 14, color: Colors.grey),
-                    ]
-                  ],
-                ),
-                onTap: () => _playOffline(item),
+              child: FutureBuilder<String>(
+                future: DownloadsManager().makeAbsolutePath(item.localPosterPath),
+                builder: (context, pathSnap) {
+                  return ListTile(
+                    leading: ClipRRect(
+                      borderRadius: BorderRadius.circular(4),
+                      child: pathSnap.hasData && pathSnap.data!.isNotEmpty && File(pathSnap.data!).existsSync()
+                          ? Image.file(File(pathSnap.data!), width: 50, height: 75, fit: BoxFit.cover)
+                          : Container(width: 50, height: 75, color: Colors.grey[900], child: const Icon(Icons.movie, color: Colors.white24)),
+                    ),
+                    title: Text(item.title, style: const TextStyle(color: Colors.white)),
+                    subtitle: Row(
+                      children: [
+                        Text(item.duration, style: const TextStyle(color: Colors.white54, fontSize: 12)),
+                        if (item.localSubtitlePaths.isNotEmpty) ...[
+                          const SizedBox(width: 10),
+                          const Icon(Icons.subtitles, size: 14, color: Colors.grey),
+                        ]
+                      ],
+                    ),
+                    onTap: () => _playOffline(item),
+                  );
+                }
               ),
             );
           },
@@ -486,29 +507,34 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
                 padding: const EdgeInsets.symmetric(horizontal: 20),
                 child: const Icon(Icons.delete, color: Colors.white),
               ),
-              child: ListTile(
-                leading: ClipRRect(
-                  borderRadius: BorderRadius.circular(4),
-                  child: firstItem.localPosterPath.isNotEmpty && File(firstItem.localPosterPath).existsSync()
-                      ? Image.file(File(firstItem.localPosterPath), width: 50, height: 75, fit: BoxFit.cover)
-                      : Container(width: 50, height: 75, color: Colors.grey[900], child: const Icon(Icons.tv, color: Colors.white24)),
-                ),
-                title: Text(title, style: const TextStyle(color: Colors.white)),
-                subtitle: Text(
-                  isActive ? "Downloading episodes..." : "${episodes.length} episodes downloaded",
-                  style: TextStyle(color: isActive ? const Color(0xFF8A2BE2) : Colors.white54, fontSize: 12),
-                ),
-                trailing: const Icon(Icons.arrow_forward_ios, color: Color(0xFF8A2BE2), size: 16),
-                onTap: () => Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) => OfflineTvShowDetailScreen(
-                      showTitle: title,
-                      episodes: episodes,
-                      onRefresh: _loadDownloads,
+              child: FutureBuilder<String>(
+                future: DownloadsManager().makeAbsolutePath(firstItem.localPosterPath),
+                builder: (context, pathSnap) {
+                  return ListTile(
+                    leading: ClipRRect(
+                      borderRadius: BorderRadius.circular(4),
+                      child: pathSnap.hasData && pathSnap.data!.isNotEmpty && File(pathSnap.data!).existsSync()
+                          ? Image.file(File(pathSnap.data!), width: 50, height: 75, fit: BoxFit.cover)
+                          : Container(width: 50, height: 75, color: Colors.grey[900], child: const Icon(Icons.tv, color: Colors.white24)),
                     ),
-                  ),
-                ).then((_) => _loadDownloads()),
+                    title: Text(title, style: const TextStyle(color: Colors.white)),
+                    subtitle: Text(
+                      isActive ? "Downloading episodes..." : "${episodes.length} episodes downloaded",
+                      style: TextStyle(color: isActive ? const Color(0xFF8A2BE2) : Colors.white54, fontSize: 12),
+                    ),
+                    trailing: const Icon(Icons.arrow_forward_ios, color: Color(0xFF8A2BE2), size: 16),
+                    onTap: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => OfflineTvShowDetailScreen(
+                          showTitle: title,
+                          episodes: episodes,
+                          onRefresh: _loadDownloads,
+                        ),
+                      ),
+                    ).then((_) => _loadDownloads()),
+                  );
+                }
               ),
             );
           },
@@ -517,13 +543,21 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
     );
   }
 
-  void _playOffline(DownloadItem item) {
+  void _playOffline(DownloadItem item) async {
+    final base = await DownloadsManager()._localPath;
+    final videoPath = path.join(base, item.localVideoPath);
+    final List<String> subPaths = [];
+    for (var s in item.localSubtitlePaths) {
+      subPaths.add(path.join(base, s));
+    }
+
+    if (!mounted) return;
     Navigator.push(
       context, 
       MaterialPageRoute(
         builder: (context) => VideoPlayerScreen(
-          videoUrl: item.localVideoPath, 
-          subtitleUrls: item.localSubtitlePaths, 
+          videoUrl: videoPath, 
+          subtitleUrls: subPaths, 
           title: item.title, 
           serverIp: '', 
           serverPort: '', 
@@ -642,7 +676,7 @@ class _OfflineTvShowDetailScreenState extends State<OfflineTvShowDetailScreen> {
           });
         });
 
-        final posterPath = _currentEpisodes.isNotEmpty ? _currentEpisodes.first.localPosterPath : (activeEpisodes.isNotEmpty ? activeEpisodes.first.value.localPosterPath : "");
+        final firstEp = _currentEpisodes.isNotEmpty ? _currentEpisodes.first : (activeEpisodes.isNotEmpty ? activeEpisodes.first.value : null);
 
         return Scaffold(
           backgroundColor: Colors.black,
@@ -650,9 +684,19 @@ class _OfflineTvShowDetailScreenState extends State<OfflineTvShowDetailScreen> {
           appBar: AppBar(backgroundColor: Colors.transparent, elevation: 0),
           body: Stack(
             children: [
-              if (posterPath.isNotEmpty && File(posterPath).existsSync())
-                Positioned.fill(child: Image.file(File(posterPath), fit: BoxFit.cover)),
-              Positioned.fill(child: BackdropFilter(filter: ImageFilter.blur(sigmaX: 40, sigmaY: 40), child: Container(color: Colors.black.withOpacity(0.1)))),
+              if (firstEp != null)
+                FutureBuilder<String>(
+                  future: DownloadsManager().makeAbsolutePath(firstEp.localPosterPath),
+                  builder: (context, pathSnap) {
+                    if (!pathSnap.hasData || pathSnap.data!.isEmpty || !File(pathSnap.data!).existsSync()) return const SizedBox.shrink();
+                    return Stack(
+                      children: [
+                        Positioned.fill(child: Image.file(File(pathSnap.data!), fit: BoxFit.cover)),
+                        Positioned.fill(child: BackdropFilter(filter: ImageFilter.blur(sigmaX: 40, sigmaY: 40), child: Container(color: Colors.black.withOpacity(0.1)))),
+                      ],
+                    );
+                  }
+                ),
               Column(
                 children: [
                   const SizedBox(height: 100),
@@ -660,7 +704,13 @@ class _OfflineTvShowDetailScreenState extends State<OfflineTvShowDetailScreen> {
                     padding: const EdgeInsets.all(16),
                     child: Row(
                       children: [
-                        ClipRRect(borderRadius: BorderRadius.circular(8), child: posterPath.isNotEmpty && File(posterPath).existsSync() ? Image.file(File(posterPath), height: 150, width: 100, fit: BoxFit.cover) : Container(height: 150, width: 100, color: Colors.grey[900])),
+                        if (firstEp != null)
+                          FutureBuilder<String>(
+                            future: DownloadsManager().makeAbsolutePath(firstEp.localPosterPath),
+                            builder: (context, pathSnap) {
+                              return ClipRRect(borderRadius: BorderRadius.circular(8), child: pathSnap.hasData && pathSnap.data!.isNotEmpty && File(pathSnap.data!).existsSync() ? Image.file(File(pathSnap.data!), height: 150, width: 100, fit: BoxFit.cover) : Container(height: 150, width: 100, color: Colors.grey[900]));
+                            }
+                          ),
                         const SizedBox(width: 16),
                         Expanded(child: Text(widget.showTitle, style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold))),
                       ],
@@ -705,9 +755,17 @@ class _OfflineTvShowDetailScreenState extends State<OfflineTvShowDetailScreen> {
                           child: Stack(
                             fit: StackFit.expand,
                             children: [
-                              ep.episodeThumbnailPath != null && File(ep.episodeThumbnailPath!).existsSync()
-                                  ? Image.file(File(ep.episodeThumbnailPath!), fit: BoxFit.cover)
-                                  : Container(color: Colors.grey[900], child: const Icon(Icons.play_circle_fill, color: Colors.white54, size: 40)),
+                              if (ep.episodeThumbnailPath != null)
+                                FutureBuilder<String>(
+                                  future: DownloadsManager().makeAbsolutePath(ep.episodeThumbnailPath!),
+                                  builder: (context, pathSnap) {
+                                    return pathSnap.hasData && pathSnap.data!.isNotEmpty && File(pathSnap.data!).existsSync()
+                                        ? Image.file(File(pathSnap.data!), fit: BoxFit.cover)
+                                        : Container(color: Colors.grey[900], child: const Icon(Icons.play_circle_fill, color: Colors.white54, size: 40));
+                                  }
+                                )
+                              else
+                                Container(color: Colors.grey[900], child: const Icon(Icons.play_circle_fill, color: Colors.white54, size: 40)),
                               if (isDownloading) ...[
                                 Container(color: Colors.black54),
                                 Center(
@@ -725,21 +783,30 @@ class _OfflineTvShowDetailScreenState extends State<OfflineTvShowDetailScreen> {
                                   child: Material(
                                     color: Colors.transparent,
                                     child: InkWell(
-                                      onTap: () => Navigator.push(
-                                        context, 
-                                        MaterialPageRoute(
-                                          builder: (context) => VideoPlayerScreen(
-                                            videoUrl: ep.localVideoPath, 
-                                            subtitleUrls: ep.localSubtitlePaths, 
-                                            title: ep.title, 
-                                            serverIp: '', 
-                                            serverPort: '', 
-                                            username: '', 
-                                            password: '', 
-                                            fileSize: 0
+                                      onTap: () async {
+                                        final base = await DownloadsManager()._localPath;
+                                        final videoPath = path.join(base, ep.localVideoPath);
+                                        final List<String> subPaths = [];
+                                        for (var s in ep.localSubtitlePaths) {
+                                          subPaths.add(path.join(base, s));
+                                        }
+                                        if (!mounted) return;
+                                        Navigator.push(
+                                          context, 
+                                          MaterialPageRoute(
+                                            builder: (context) => VideoPlayerScreen(
+                                              videoUrl: videoPath, 
+                                              subtitleUrls: subPaths, 
+                                              title: ep.title, 
+                                              serverIp: '', 
+                                              serverPort: '', 
+                                              username: '', 
+                                              password: '', 
+                                              fileSize: 0
+                                            )
                                           )
-                                        )
-                                      ).then((_) => _refreshLibrary()),
+                                        ).then((_) => _refreshLibrary());
+                                      },
                                     ),
                                   ),
                                 ),

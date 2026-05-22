@@ -397,11 +397,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
       String content = '';
 
       if (isLocal) {
-        String rawPath = url;
-        if (rawPath.startsWith('file://')) rawPath = rawPath.replaceFirst('file://', '');
-        if (rawPath.contains('?')) rawPath = rawPath.split('?')[0];
-        rawPath = Uri.decodeFull(rawPath);
-        content = await File(p.normalize(rawPath)).readAsString();
+        content = await File(url).readAsString();
       } else {
         final auth = 'Basic ${base64Encode(utf8.encode('${widget.username}:${widget.password}'))}';
         final response = await http.get(Uri.parse(url), headers: {
@@ -760,11 +756,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
   void _showSubtitlePicker() async {
     final bool isLocal = !widget.videoUrl.startsWith('http');
     if (isLocal) {
-      String rawPath = widget.videoUrl;
-      if (rawPath.startsWith('file://')) rawPath = rawPath.replaceFirst('file://', '');
-      if (rawPath.contains('?')) rawPath = rawPath.split('?')[0];
-      rawPath = Uri.decodeFull(rawPath);
-      final dir = Directory(p.dirname(rawPath));
+      final dir = Directory(p.dirname(widget.videoUrl));
       if (!await dir.exists()) return;
       final files = dir.listSync().where((f) => f.path.endsWith('.srt')).toList();
       showDialog(
