@@ -66,5 +66,9 @@
 		<string>remote-notification</string>
 		<string>audio</string>
 	</array>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>PalmVibe needs access to your library to save media files.</string>
+	<key>NSAppleMusicUsageDescription</key>
+	<string>PalmVibe needs access to play media in the background.</string>
 </dict>
 </plist>

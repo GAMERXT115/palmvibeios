@@ -164,7 +164,7 @@ class VideoPlayerScreen extends StatefulWidget {
   State<VideoPlayerScreen> createState() => _VideoPlayerScreenState();
 }
 
-class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProviderStateMixin {
+class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProviderStateMixin, WidgetsBindingObserver {
   VideoPlayerController? _videoPlayerController;
   ChewieController? _chewieController;
   bool _isLoading = true;
@@ -200,6 +200,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     WakelockPlus.enable();
     SystemChrome.setPreferredOrientations([
       DeviceOrientation.landscapeLeft,
@@ -233,20 +234,38 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
     _initializePlayer();
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (state == AppLifecycleState.resumed) {
+      _videoPlayerController?.play();
+    }
+  }
+
   Future<void> _initializePlayer() async {
     try {
       final bool isLocal = !widget.videoUrl.startsWith('http');
 
       if (isLocal) {
-        String cleanPath = widget.videoUrl;
-        if (cleanPath.contains('?')) cleanPath = cleanPath.split('?')[0];
-        if (cleanPath.contains('&')) cleanPath = cleanPath.split('&')[0];
-        
-        final file = File(cleanPath);
-        if (!await file.exists()) {
-          throw Exception("Local file not found");
+        String rawPath = widget.videoUrl;
+        if (rawPath.startsWith('file://')) {
+          rawPath = rawPath.replaceFirst('file://', '');
         }
-        _videoPlayerController = VideoPlayerController.file(file);
+        if (rawPath.contains('?')) {
+          rawPath = rawPath.split('?')[0];
+        }
+        rawPath = Uri.decodeFull(rawPath);
+        final cleanPath = p.normalize(rawPath);
+        final file = File(cleanPath);
+        
+        if (!file.existsSync()) {
+          throw Exception("File not found: $cleanPath");
+        }
+
+        _videoPlayerController = VideoPlayerController.file(
+          file,
+          videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
+        );
       } else {
         final auth = 'Basic ${base64Encode(utf8.encode('${widget.username}:${widget.password}'))}';
         final base64Token = auth.split(' ')[1];
@@ -259,6 +278,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
             'Authorization': auth,
             'ngrok-skip-browser-warning': 'true',
           },
+          videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
         );
       }
 
@@ -318,7 +338,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
       if (mounted) {
         setState(() {
           _hasError = true;
-          _errorMessage = _videoPlayerController!.value.errorDescription ?? 'Unknown Error';
+          _errorMessage = _videoPlayerController!.value.errorDescription ?? 'Playback Error';
         });
       }
       return;
@@ -377,10 +397,11 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
       String content = '';
 
       if (isLocal) {
-        String cleanPath = url;
-        if (cleanPath.contains('?')) cleanPath = cleanPath.split('?')[0];
-        if (cleanPath.contains('&')) cleanPath = cleanPath.split('&')[0];
-        content = await File(cleanPath).readAsString();
+        String rawPath = url;
+        if (rawPath.startsWith('file://')) rawPath = rawPath.replaceFirst('file://', '');
+        if (rawPath.contains('?')) rawPath = rawPath.split('?')[0];
+        rawPath = Uri.decodeFull(rawPath);
+        content = await File(p.normalize(rawPath)).readAsString();
       } else {
         final auth = 'Basic ${base64Encode(utf8.encode('${widget.username}:${widget.password}'))}';
         final response = await http.get(Uri.parse(url), headers: {
@@ -401,7 +422,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
   void _parseSRT(String content) {
     _subtitles.clear();
     final exp = RegExp(
-      r'(\d+)\r?\n(\d{1,2}:\d{2}:\d{1,2},\d{2,3}) --> (\d{1,2}:\d{2}:\d{1,2},\d{2,3})\r?\n([\s\S]*?)(?=\r?\n\r?\n\d+\r?\n|\$)',
+      r'(\d+)\r?\n(\d{1,2}:\d{2}:\d{1,2},\d{2,3}) --> (\d{1,2}:\d{2}:\d{1,2},\d{2,3})\r?\n([\s\S]*?)(?=\r?\n\r?\n\d+\r?\n|$)',
       multiLine: true,
     );
 
@@ -739,9 +760,11 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
   void _showSubtitlePicker() async {
     final bool isLocal = !widget.videoUrl.startsWith('http');
     if (isLocal) {
-      String cleanPath = widget.videoUrl;
-      if (cleanPath.contains('?')) cleanPath = cleanPath.split('?')[0];
-      final dir = Directory(p.dirname(cleanPath));
+      String rawPath = widget.videoUrl;
+      if (rawPath.startsWith('file://')) rawPath = rawPath.replaceFirst('file://', '');
+      if (rawPath.contains('?')) rawPath = rawPath.split('?')[0];
+      rawPath = Uri.decodeFull(rawPath);
+      final dir = Directory(p.dirname(rawPath));
       if (!await dir.exists()) return;
       final files = dir.listSync().where((f) => f.path.endsWith('.srt')).toList();
       showDialog(
@@ -848,6 +871,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _saveCurrentPosition();
     _hideTimer?.cancel();
     _subtitleTimer?.cancel();

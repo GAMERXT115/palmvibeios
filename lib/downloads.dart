@@ -2,12 +2,16 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:async';
 import 'dart:ui';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:path/path.dart' as path;
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'video_player.dart';
+
+final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
 
 class DownloadItem {
   final String title;
@@ -62,6 +66,34 @@ class DownloadsManager {
   final Map<String, DownloadItem> activeMetadata = {};
   final Map<String, bool> cancelRequests = {};
   final StreamController<Map<String, double>> progressController = StreamController<Map<String, double>>.broadcast();
+
+  Future<void> _showLocalNotification(String title, String body) async {
+    const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
+      'downloads',
+      'Downloads',
+      channelDescription: 'Notifications for file downloads',
+      importance: Importance.max,
+      priority: Priority.high,
+    );
+
+    const DarwinNotificationDetails iosDetails = DarwinNotificationDetails(
+      presentAlert: true,
+      presentBadge: true,
+      presentSound: true,
+    );
+
+    const NotificationDetails platformDetails = NotificationDetails(
+      android: androidDetails,
+      iOS: iosDetails,
+    );
+
+    await flutterLocalNotificationsPlugin.show(
+      DateTime.now().millisecond,
+      title,
+      body,
+      platformDetails,
+    );
+  }
 
   Future<void> startDownload({
     required String videoUrl,
@@ -168,9 +200,11 @@ class DownloadsManager {
       await _saveMetadata(finalItem);
       _cleanupActive(videoUrl);
       onNotify('Download complete: $title');
+      await _showLocalNotification('Download Complete', title);
     } catch (e) {
       _cleanupActive(videoUrl);
       onNotify('Download failed: $e');
+      await _showLocalNotification('Download Failed', title);
     }
   }
 
@@ -182,14 +216,16 @@ class DownloadsManager {
   }
 
   Future<void> _downloadStaticFile(String url, String savePath, String auth) async {
-    final response = await http.get(Uri.parse(url), headers: {
-      'Authorization': auth,
-      'ngrok-skip-browser-warning': 'true',
-    });
-    if (response.statusCode == 200) {
-      final file = File(savePath);
-      await file.writeAsBytes(response.bodyBytes);
-    }
+    try {
+      final response = await http.get(Uri.parse(url), headers: {
+        'Authorization': auth,
+        'ngrok-skip-browser-warning': 'true',
+      });
+      if (response.statusCode == 200) {
+        final file = File(savePath);
+        await file.writeAsBytes(response.bodyBytes);
+      }
+    } catch (e) {}
   }
 
   Future<void> _saveMetadata(DownloadItem item) async {
@@ -197,6 +233,7 @@ class DownloadsManager {
     List<String> list = prefs.getStringList('downloaded_content_v2') ?? [];
     list.add(jsonEncode(item.toJson()));
     await prefs.setStringList('downloaded_content_v2', list);
+    progressController.add({});
   }
 
   Future<List<DownloadItem>> getDownloads() async {
@@ -223,6 +260,7 @@ class DownloadsManager {
       final sFile = File(s);
       if (await sFile.exists()) await sFile.delete();
     }
+    progressController.add({});
   }
 
   Future<void> deleteShow(String showTitle) async {
@@ -236,6 +274,7 @@ class DownloadsManager {
     if (await showDir.exists()) {
       await showDir.delete(recursive: true);
     }
+    progressController.add({});
   }
 
   void stopDownload(String url) {
@@ -271,11 +310,18 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
     super.dispose();
   }
 
+  int _extractNumber(String s) {
+    final match = RegExp(r'(\d+)').firstMatch(s);
+    return match != null ? int.parse(match.group(1)!) : 0;
+  }
+
   Future<void> _loadDownloads() async {
     final items = await DownloadsManager().getDownloads();
     if (mounted) {
       setState(() {
         _movies = items.where((i) => i.showTitle == null).toList();
+        _movies.sort((a, b) => _extractNumber(a.title).compareTo(_extractNumber(b.title)));
+        
         _tvShows = {};
         for (var ep in items.where((i) => i.showTitle != null)) {
           _tvShows.putIfAbsent(ep.showTitle!, () => []).add(ep);
@@ -309,9 +355,10 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
         appBar: AppBar(
           title: const Text('Downloads'),
           backgroundColor: Colors.black,
-          bottom: const TabBar(
-            indicatorColor: Color(0xFF8A2BE2),
-            tabs: [Tab(text: "Movies"), Tab(text: "TV Shows")],
+          bottom: TabBar(
+            indicatorColor: const Color(0xFF8A2BE2),
+            onTap: (index) => _loadDownloads(),
+            tabs: const [Tab(text: "Movies"), Tab(text: "TV Shows")],
           ),
         ),
         body: _isLoading
@@ -461,7 +508,7 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
                       onRefresh: _loadDownloads,
                     ),
                   ),
-                ),
+                ).then((_) => _loadDownloads()),
               ),
             );
           },
@@ -471,7 +518,21 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
   }
 
   void _playOffline(DownloadItem item) {
-    Navigator.push(context, MaterialPageRoute(builder: (context) => VideoPlayerScreen(videoUrl: item.localVideoPath, subtitleUrls: item.localSubtitlePaths, title: item.title, serverIp: '', serverPort: '', username: '', password: '', fileSize: 0)));
+    Navigator.push(
+      context, 
+      MaterialPageRoute(
+        builder: (context) => VideoPlayerScreen(
+          videoUrl: item.localVideoPath, 
+          subtitleUrls: item.localSubtitlePaths, 
+          title: item.title, 
+          serverIp: '', 
+          serverPort: '', 
+          username: '', 
+          password: '', 
+          fileSize: 0
+        )
+      )
+    ).then((_) => _loadDownloads());
   }
 }
 
@@ -544,6 +605,11 @@ class _OfflineTvShowDetailScreenState extends State<OfflineTvShowDetailScreen> {
     );
   }
 
+  int _extractNumber(String s) {
+    final match = RegExp(r'(\d+)').firstMatch(s);
+    return match != null ? int.parse(match.group(1)!) : 0;
+  }
+
   @override
   Widget build(BuildContext context) {
     return StreamBuilder<Map<String, double>>(
@@ -567,12 +633,12 @@ class _OfflineTvShowDetailScreenState extends State<OfflineTvShowDetailScreen> {
           seasons.putIfAbsent(item.seasonName ?? "Season 1", () => []).add(ep);
         }
         
-        final seasonNames = seasons.keys.toList()..sort();
+        final seasonNames = seasons.keys.toList()..sort((a, b) => _extractNumber(a).compareTo(_extractNumber(b)));
         seasons.forEach((key, value) {
           value.sort((a, b) {
             final aItem = a is MapEntry<String, DownloadItem> ? a.value : a as DownloadItem;
             final bItem = b is MapEntry<String, DownloadItem> ? b.value : b as DownloadItem;
-            return aItem.title.compareTo(bItem.title);
+            return _extractNumber(aItem.title).compareTo(_extractNumber(bItem.title));
           });
         });
 
@@ -659,7 +725,21 @@ class _OfflineTvShowDetailScreenState extends State<OfflineTvShowDetailScreen> {
                                   child: Material(
                                     color: Colors.transparent,
                                     child: InkWell(
-                                      onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => VideoPlayerScreen(videoUrl: ep.localVideoPath, subtitleUrls: ep.localSubtitlePaths, title: ep.title, serverIp: '', serverPort: '', username: '', password: '', fileSize: 0))),
+                                      onTap: () => Navigator.push(
+                                        context, 
+                                        MaterialPageRoute(
+                                          builder: (context) => VideoPlayerScreen(
+                                            videoUrl: ep.localVideoPath, 
+                                            subtitleUrls: ep.localSubtitlePaths, 
+                                            title: ep.title, 
+                                            serverIp: '', 
+                                            serverPort: '', 
+                                            username: '', 
+                                            password: '', 
+                                            fileSize: 0
+                                          )
+                                        )
+                                      ).then((_) => _refreshLibrary()),
                                     ),
                                   ),
                                 ),
@@ -710,4 +790,3 @@ class _OfflineTvShowDetailScreenState extends State<OfflineTvShowDetailScreen> {
     );
   }
 }
-

@@ -4,8 +4,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:timezone/data/latest_all.dart' as tz;
+import 'package:timezone/timezone.dart' as tz;
 import 'login.dart';
 import 'splash_screen.dart';
+
+final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
 
 class CustomHttpOverrides extends HttpOverrides {
   @override
@@ -21,6 +26,7 @@ bool isFirebaseInitialized = false;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  tz.initializeTimeZones();
 
   try {
     if (Firebase.apps.isEmpty) {
@@ -37,6 +43,21 @@ void main() async {
   } catch (e) {
     isFirebaseInitialized = false;
   }
+
+  const AndroidInitializationSettings initializationSettingsAndroid = AndroidInitializationSettings('@mipmap/ic_launcher');
+
+  const DarwinInitializationSettings initializationSettingsDarwin = DarwinInitializationSettings(
+    requestAlertPermission: true,
+    requestBadgePermission: true,
+    requestSoundPermission: true,
+  );
+
+  const InitializationSettings initializationSettings = InitializationSettings(
+    android: initializationSettingsAndroid,
+    iOS: initializationSettingsDarwin,
+  );
+
+  await flutterLocalNotificationsPlugin.initialize(initializationSettings);
 
   HttpOverrides.global = CustomHttpOverrides();
 
@@ -63,6 +84,30 @@ class _PalmVibeAppState extends State<PalmVibeApp> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       WakelockPlus.enable();
     });
+  }
+
+  Future<void> scheduleNotification(String title, String body, int seconds) async {
+    await flutterLocalNotificationsPlugin.zonedSchedule(
+      0,
+      title,
+      body,
+      tz.TZDateTime.now(tz.local).add(Duration(seconds: seconds)),
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'scheduled_ch',
+          'Scheduled Notifications',
+          importance: Importance.max,
+          priority: Priority.high,
+        ),
+        iOS: DarwinNotificationDetails(
+          presentAlert: true,
+          presentBadge: true,
+          presentSound: true,
+        ),
+      ),
+      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+      uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
+    );
   }
 
   @override
