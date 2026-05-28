@@ -19,6 +19,13 @@ jobs:
       - name: Get dependencies
         run: flutter pub get
 
+      - name: Fix Deployment Target
+        run: |
+          find ios -name "project.pbxproj" -exec sed -i '' 's/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]*/IPHONEOS_DEPLOYMENT_TARGET = 13.0/g' {} +
+          if [ -f ios/Podfile ]; then
+            sed -i '' "s/platform :ios, '[0-9.]*'/platform :ios, '13.0'/g" ios/Podfile
+          fi
+
       - name: Build iOS
         run: flutter build ios --release --no-codesign
 
@@ -26,10 +33,10 @@ jobs:
         run: |
           mkdir -p Payload
           mv build/ios/iphoneos/Runner.app Payload/
-          zip -r Runner.zip Payload
+          zip -r Runner.ipa Payload
 
       - name: Upload Runner
         uses: actions/upload-artifact@v4
         with:
           name: Runner-App
-          path: Runner.zip
+          path: Runner.ipa
