@@ -1,0 +1,42 @@
+name: Build iOS Runner
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          flutter-version: '3.41.9'
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Fix Deployment Target
+        run: |
+          find ios -name "project.pbxproj" -exec sed -i '' 's/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]*/IPHONEOS_DEPLOYMENT_TARGET = 13.0/g' {} +
+          if [ -f ios/Podfile ]; then
+            sed -i '' "s/platform :ios, '[0-9.]*'/platform :ios, '13.0'/g" ios/Podfile
+          fi
+
+      - name: Build iOS
+        run: flutter build ios --release --no-codesign
+
+      - name: Prepare Artifact
+        run: |
+          mkdir -p Payload
+          mv build/ios/iphoneos/Runner.app Payload/
+          zip -r Runner.ipa Payload
+
+      - name: Upload Runner
+        uses: actions/upload-artifact@v4
+        with:
+          name: Runner-App
+          path: Runner.ipa
