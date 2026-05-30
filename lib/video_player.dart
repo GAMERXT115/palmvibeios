@@ -300,7 +300,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
           _isLoading = false;
         });
         _videoPlayerController!.play();
-        _videoPlayerController!.setVolume(_volumeBoost > 1.0 ? 1.0 : _volumeBoost);
+        _videoPlayerController!.setVolume(_volumeBoost);
         _startHideTimer();
         _startProgressSaveTimer();
         
@@ -830,10 +830,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
             mainAxisSize: MainAxisSize.min,
             children: [
               _buildAccRow('Volume Boost', '${_volumeBoost.toStringAsFixed(1)}x', () {
-                setState(() { _volumeBoost = math.max(1.0, _volumeBoost - 1.0); _videoPlayerController?.setVolume(_volumeBoost > 1.0 ? 1.0 : _volumeBoost); });
+                setState(() { _volumeBoost = math.max(1.0, _volumeBoost - 1.0); _videoPlayerController?.setVolume(_volumeBoost); });
                 setDialogState(() {});
               }, () {
-                setState(() { _volumeBoost = math.min(20.0, _volumeBoost + 1.0); _videoPlayerController?.setVolume(_volumeBoost > 1.0 ? 1.0 : _volumeBoost); });
+                setState(() { _volumeBoost = math.min(20.0, _volumeBoost + 1.0); _videoPlayerController?.setVolume(_volumeBoost); });
                 setDialogState(() {});
               }),
               _buildAccRow('Font Size', '${_subSize.toInt()}px', () { setState(() => _subSize -= 2); setDialogState(() {}); }, () { setState(() => _subSize += 2); setDialogState(() {}); }),
