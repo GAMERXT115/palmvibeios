@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 import 'package:package_info_plus/package_info_plus.dart';
 
 class SplashScreen extends StatefulWidget {
@@ -13,57 +14,75 @@ class SplashScreen extends StatefulWidget {
 }
 
 class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMixin {
+  // Animation controllers
   late AnimationController _mainController;
-  late AnimationController _weldingController;
+  late AnimationController _weldingController; // New controller for welding effect
   late AnimationController _pulseController;
   late AnimationController _waveController;
 
+  // Main animations
   late Animation<double> _fadeInAnimation;
   late Animation<double> _scaleAnimation;
   late Animation<double> _rotationAnimation;
 
+  // Text animations
   late Animation<double> _titleOpacityAnimation;
   late Animation<Offset> _titleSlideAnimation;
   late Animation<double> _subtitleOpacityAnimation;
   late Animation<Offset> _subtitleSlideAnimation;
 
+  // Logo animations
   late Animation<double> _logoGlowAnimation;
   late Animation<double> _logoBouncingAnimation;
+
+  // Welding circle animations
   late Animation<double> _weldingRotationAnimation;
 
+  // Spark particles
   List<SparkParticle> _sparkParticles = [];
-  String _appVersion = '1.0.0';
+  bool _sparksInitialized = false;
 
-  final Color primaryPurple = const Color(0xFF8A2BE2);
-  final Color lightPurple = const Color(0xFFB19CD9);
-  final Color darkPurple = const Color(0xFF4B0082);
-  final Color accentPurple = const Color(0xFFD8BFD8);
+  // App version
+  String _appVersion = '1.0.0'; // Default value
+
+  // Purple theme colors
+  final Color primaryPurple = const Color(0xFF8A2BE2); // BlueViolet
+  final Color lightPurple = const Color(0xFFB19CD9);   // Light purple
+  final Color darkPurple = const Color(0xFF4B0082);    // Indigo
+  final Color accentPurple = const Color(0xFFD8BFD8);  // Thistle
 
   @override
   void initState() {
     super.initState();
+
+    // Load app version
     _loadAppVersion();
 
+    // Initialize main animation controller
     _mainController = AnimationController(
       duration: const Duration(milliseconds: 3000),
       vsync: this,
     );
 
+    // Initialize welding animation controller
     _weldingController = AnimationController(
-      duration: const Duration(milliseconds: 4000),
+      duration: const Duration(milliseconds: 6000), // Slower welding animation
       vsync: this,
     )..repeat();
 
+    // Initialize pulse animation controller
     _pulseController = AnimationController(
       duration: const Duration(milliseconds: 1500),
       vsync: this,
     )..repeat(reverse: true);
 
+    // Initialize wave animation controller
     _waveController = AnimationController(
       duration: const Duration(milliseconds: 2000),
       vsync: this,
     )..repeat();
 
+    // Main animations
     _fadeInAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
       CurvedAnimation(
         parent: _mainController,
@@ -85,6 +104,7 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
       ),
     );
 
+    // Text animations
     _titleOpacityAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
       CurvedAnimation(
         parent: _mainController,
@@ -119,6 +139,7 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
       ),
     );
 
+    // Logo animations
     _logoGlowAnimation = Tween<double>(begin: 1.0, end: 1.5).animate(
       CurvedAnimation(
         parent: _pulseController,
@@ -133,21 +154,23 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
       ),
     );
 
-    _weldingRotationAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
+    // Welding circle animation
+    _weldingRotationAnimation = Tween<double>(begin: 0.0, end: math.pi * 2).animate(
       CurvedAnimation(
         parent: _weldingController,
         curve: Curves.linear,
       ),
     );
 
+    // Start animations
     _mainController.forward();
-    _initializeSparkParticles();
-    _navigateToNext();
-  }
+    _weldingController.forward();
 
-  Future<void> _navigateToNext() async {
-    await Future.delayed(const Duration(seconds: 4));
-    if (mounted) {
+    // Initialize the spark particles
+    _initializeSparkParticles();
+
+    // Navigate to next screen after delay
+    Timer(const Duration(seconds: 5), () {
       Navigator.pushReplacement(
         context,
         PageRouteBuilder(
@@ -156,17 +179,22 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
             const begin = Offset(1.0, 0.0);
             const end = Offset.zero;
             const curve = Curves.easeInOutCubic;
+
             var tween = Tween(begin: begin, end: end).chain(CurveTween(curve: curve));
             var offsetAnimation = animation.drive(tween);
+
             return SlideTransition(
               position: offsetAnimation,
-              child: FadeTransition(opacity: animation, child: child),
+              child: FadeTransition(
+                opacity: animation,
+                child: child,
+              ),
             );
           },
           transitionDuration: const Duration(milliseconds: 800),
         ),
       );
-    }
+    });
   }
 
   Future<void> _loadAppVersion() async {
@@ -175,17 +203,22 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
       setState(() {
         _appVersion = packageInfo.version;
       });
-    } catch (e) {}
+      print('Loaded app version: $_appVersion'); // Debug log
+    } catch (e) {
+      print('Error loading package info: $e');
+      // Keep the default version if there's an error
+    }
   }
 
   void _initializeSparkParticles() {
     _sparkParticles = List.generate(
-      50,
+      40, // Number of sparks
       (index) => SparkParticle(
         angle: math.Random().nextDouble() * 2 * math.pi,
-        speed: math.Random().nextDouble() * 2 + 1,
-        offset: math.Random().nextDouble(),
-        color: lightPurple,
+        speed: math.Random().nextDouble() * 3 + 1,
+        offset: Offset.zero,
+        lifetime: math.Random().nextDouble() * 1.5 + 0.5, // Lifetime between 0.5 and 2 seconds
+        color: lightPurple.withOpacity(0.8),
         size: math.Random().nextDouble() * 2 + 1,
       ),
     );
@@ -203,10 +236,12 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
   @override
   Widget build(BuildContext context) {
     final Size size = MediaQuery.of(context).size;
+
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
         children: [
+          // Main content
           Center(
             child: AnimatedBuilder(
               animation: Listenable.merge([_mainController, _pulseController, _waveController, _weldingController]),
@@ -214,6 +249,7 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
                 return Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
+                    // Logo animation
                     Transform.translate(
                       offset: Offset(0, _logoBouncingAnimation.value),
                       child: FadeTransition(
@@ -225,9 +261,10 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
                             child: Stack(
                               alignment: Alignment.center,
                               children: [
+                                // Background circle with glow
                                 Container(
-                                  width: 120,
-                                  height: 120,
+                                  width: 150,
+                                  height: 150,
                                   decoration: BoxDecoration(
                                     shape: BoxShape.circle,
                                     boxShadow: [
@@ -239,17 +276,19 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
                                     ],
                                   ),
                                   child: ClipRRect(
-                                    borderRadius: BorderRadius.circular(60),
+                                    borderRadius: BorderRadius.circular(75),
                                     child: Image.asset(
                                       'assets/icon/app_icon.png',
-                                      width: 120,
-                                      height: 120,
+                                      width: 150,
+                                      height: 150,
                                       fit: BoxFit.cover,
                                     ),
                                   ),
                                 ),
+                                
+                                // Welding particles animation
                                 CustomPaint(
-                                  size: const Size(150, 150),
+                                  size: const Size(180, 180),
                                   painter: WeldingCirclePainter(
                                     animationValue: _weldingRotationAnimation.value,
                                     color: lightPurple.withOpacity(0.6),
@@ -261,7 +300,10 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
                         ),
                       ),
                     ),
-                    const SizedBox(height: 40),
+                    
+                    const SizedBox(height: 50),
+                    
+                    // Title animation
                     FadeTransition(
                       opacity: _titleOpacityAnimation,
                       child: SlideTransition(
@@ -269,7 +311,11 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
                         child: ShaderMask(
                           shaderCallback: (bounds) {
                             return LinearGradient(
-                              colors: [lightPurple, primaryPurple, darkPurple],
+                              colors: [
+                                lightPurple,
+                                primaryPurple,
+                                darkPurple,
+                              ],
                               stops: const [0.0, 0.5, 1.0],
                               begin: Alignment.topLeft,
                               end: Alignment.bottomRight,
@@ -280,7 +326,7 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
                             'Palm Vibe',
                             style: TextStyle(
                               color: Colors.white,
-                              fontSize: 28,
+                              fontSize: 32,
                               fontWeight: FontWeight.bold,
                               letterSpacing: 1.2,
                             ),
@@ -288,16 +334,19 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
                         ),
                       ),
                     ),
-                    const SizedBox(height: 15),
+                    
+                    const SizedBox(height: 20),
+                    
+                    // Subtitle animation
                     FadeTransition(
                       opacity: _subtitleOpacityAnimation,
                       child: SlideTransition(
                         position: _subtitleSlideAnimation,
                         child: Text(
-                          'Cinema in Your Pocket.',
+                          'Cinema in Your Pocket. Anytime. Anywhere. Palm Vibe.',
                           style: TextStyle(
                             color: accentPurple,
-                            fontSize: 14,
+                            fontSize: 16,
                             letterSpacing: 0.5,
                           ),
                         ),
@@ -308,6 +357,8 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
               },
             ),
           ),
+          
+          // Version display - sleek style at the bottom
           Align(
             alignment: Alignment.bottomCenter,
             child: Padding(
@@ -316,14 +367,16 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
                 'Version $_appVersion',
                 style: TextStyle(
                   color: Colors.grey[600],
-                  fontSize: 10,
+                  fontSize: 12,
                   letterSpacing: 0.3,
                 ),
               ),
             ),
           ),
+          
+          // Spark particles effect
           AnimatedBuilder(
-            animation: _weldingRotationAnimation,
+            animation: _weldingController,
             builder: (context, child) {
               return CustomPaint(
                 size: Size.infinite,
@@ -339,8 +392,60 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
       ),
     );
   }
+
+  Widget _buildLoadingIndicator() {
+    return SizedBox(
+      width: 60,
+      height: 60,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          // Rotating circle
+          RotationTransition(
+            turns: Tween(begin: 0.0, end: 1.0).animate(
+              CurvedAnimation(
+                parent: _waveController,
+                curve: Curves.linear,
+              ),
+            ),
+            child: CircularProgressIndicator(
+              valueColor: AlwaysStoppedAnimation<Color>(lightPurple),
+              strokeWidth: 2,
+              backgroundColor: Colors.grey.shade800.withOpacity(0.3),
+            ),
+          ),
+
+          // Pulsing inner circle
+          AnimatedBuilder(
+            animation: _pulseController,
+            builder: (context, child) {
+              return Container(
+                width: 40 * _logoGlowAnimation.value * 0.7,
+                height: 40 * _logoGlowAnimation.value * 0.7,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: primaryPurple.withOpacity(0.3),
+                ),
+              );
+            },
+          ),
+
+          // Static inner circle
+          Container(
+            width: 20,
+            height: 20,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: primaryPurple,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
+// Custom painter for welding circle
 class WeldingCirclePainter extends CustomPainter {
   final double animationValue;
   final Color color;
@@ -354,37 +459,42 @@ class WeldingCirclePainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final center = Offset(size.width / 2, size.height / 2);
     final radius = size.width / 2;
+    
     final paint = Paint()
       ..color = color
-      ..strokeWidth = 2.5
+      ..strokeWidth = 3.0
       ..style = PaintingStyle.stroke
       ..strokeCap = StrokeCap.round;
     
-    const segmentCount = 25;
-    const segmentLength = 12.0;
-    const emptyLength = 8.0;
+    const segmentCount = 30;
+    const segmentLength = 15.0;
+    const emptyLength = 10.0;
     
     for (int i = 0; i < segmentCount; i++) {
       final startAngle = (animationValue * 360 + i * (segmentLength + emptyLength)) * math.pi / 180;
+      final endAngle = startAngle + segmentLength * math.pi / 180;
+      
       paint.color = color.withOpacity(1.0 - (i / segmentCount));
+      
       canvas.drawArc(
         Rect.fromCircle(center: center, radius: radius),
         startAngle,
         segmentLength * math.pi / 180,
         false,
         paint,
-      );
+        );
+      }
     }
-  }
     
-  @override
-  bool shouldRepaint(WeldingCirclePainter oldDelegate) => animationValue != oldDelegate.animationValue || color != oldDelegate.color;
-}
+    @override
+    bool shouldRepaint(WeldingCirclePainter oldDelegate) => animationValue != oldDelegate.animationValue || color != oldDelegate.color;
+  }
 
-class SparkParticle {
+  class SparkParticle {
   double angle;
   double speed;
-  double offset;
+  Offset offset;
+  double lifetime;
   Color color;
   double size;
 
@@ -392,11 +502,13 @@ class SparkParticle {
     required this.angle,
     required this.speed,
     required this.offset,
+    required this.lifetime,
     required this.color,
     required this.size,
   });
 }
 
+// Custom painter for spark particles
 class SparkParticlePainter extends CustomPainter {
   final double animationValue;
   final Offset center;
@@ -411,16 +523,18 @@ class SparkParticlePainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     for (var particle in particles) {
-      final double progress = (animationValue + particle.offset) % 1.0;
-      final double distance = progress * 200 * particle.speed;
+      // Calculate the offset based on the angle, speed, and animation value
+      final distance = particle.speed * animationValue * 30; // Adjust for visual effect
       final offset = Offset(
         center.dx + math.cos(particle.angle) * distance,
         center.dy + math.sin(particle.angle) * distance,
       );
-      final double opacity = (1.0 - progress).clamp(0.0, 1.0);
+
+      // Draw the spark particle
       final paint = Paint()
-        ..color = particle.color.withOpacity(opacity)
+        ..color = particle.color
         ..style = PaintingStyle.fill;
+
       canvas.drawCircle(offset, particle.size, paint);
     }
   }

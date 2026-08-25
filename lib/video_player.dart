@@ -1,139 +1,24 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:convert';
-import 'dart:math' as math;
 import 'dart:ui';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:video_player/video_player.dart';
-import 'package:chewie/chewie.dart';
-import 'package:path/path.dart' as p;
+import 'package:path/path.dart' as path;
 import 'package:http/http.dart' as http;
-import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-
-class VideoProgress {
-  final String videoUrl;
-  final String username;
-  final int position;
-  final int duration;
-  final DateTime lastUpdated;
-
-  VideoProgress({
-    required this.videoUrl,
-    required this.username,
-    required this.position,
-    required this.duration,
-    required this.lastUpdated,
-  });
-
-  Map<String, dynamic> toJson() {
-    return {
-      'videoUrl': videoUrl,
-      'username': username,
-      'position': position,
-      'duration': duration,
-      'lastUpdated': lastUpdated.toIso8601String(),
-    };
-  }
-
-  factory VideoProgress.fromJson(Map<String, dynamic> json) {
-    return VideoProgress(
-      videoUrl: json['videoUrl'],
-      username: json['username'],
-      position: json['position'],
-      duration: json['duration'],
-      lastUpdated: DateTime.parse(json['lastUpdated']),
-    );
-  }
-
-  double get percentageWatched {
-    if (duration <= 0) return 0;
-    return (position / duration).clamp(0.0, 1.0);
-  }
-}
-
-class VideoProgressManager {
-  static const String _prefsKey = 'video_progress';
-  
-  static Future<void> saveProgress(
-    String videoUrl, 
-    String username, 
-    int position, 
-    int duration,
-  ) async {
-    try {
-      if (position < 5000 || (duration - position < 10000)) {
-        return;
-      }
-      
-      final prefs = await SharedPreferences.getInstance();
-      final progress = VideoProgress(
-        videoUrl: videoUrl,
-        username: username,
-        position: position,
-        duration: duration,
-        lastUpdated: DateTime.now(),
-      );
-      
-      final Map<String, dynamic> allProgress = await _getAllProgress();
-      final String key = '$username:$videoUrl';
-      allProgress[key] = progress.toJson();
-      await prefs.setString(_prefsKey, jsonEncode(allProgress));
-    } catch (e) {}
-  }
-  
-  static Future<VideoProgress?> getProgress(String videoUrl, String username) async {
-    try {
-      final Map<String, dynamic> allProgress = await _getAllProgress();
-      final String key = '$username:$videoUrl';
-      if (allProgress.containsKey(key)) {
-        return VideoProgress.fromJson(allProgress[key]);
-      }
-      return null;
-    } catch (e) {
-      return null;
-    }
-  }
-  
-  static Future<Map<String, dynamic>> _getAllProgress() async {
-    final prefs = await SharedPreferences.getInstance();
-    final String? progressJson = prefs.getString(_prefsKey);
-    if (progressJson == null || progressJson.isEmpty) return {};
-    try {
-      return Map<String, dynamic>.from(jsonDecode(progressJson));
-    } catch (e) {
-      return {};
-    }
-  }
-
-  static Future<List<VideoProgress>> getUserProgress(String username) async {
-    try {
-      final Map<String, dynamic> allProgress = await _getAllProgress();
-      final List<VideoProgress> userProgress = [];
-      for (final entry in allProgress.entries) {
-        if (entry.key.startsWith('$username:')) {
-          userProgress.add(VideoProgress.fromJson(entry.value));
-        }
-      }
-      userProgress.sort((a, b) => b.lastUpdated.compareTo(a.lastUpdated));
-      return userProgress;
-    } catch (e) {
-      return [];
-    }
-  }
-}
+import 'package:media_kit/media_kit.dart';
+import 'package:media_kit_video/media_kit_video.dart';
+import 'video_progress_manager.dart';
+import 'accessibility.dart';
 
 class SubtitleEntry {
+  final int index;
   final Duration start;
   final Duration end;
   final String text;
-  
-  SubtitleEntry({
-    required this.start,
-    required this.end,
-    required this.text,
-  });
+  SubtitleEntry({required this.index, required this.start, required this.end, required this.text});
 }
 
 class VideoPlayerScreen extends StatefulWidget {
@@ -148,7 +33,7 @@ class VideoPlayerScreen extends StatefulWidget {
   final Map<String, dynamic>? nextEpisode;
 
   const VideoPlayerScreen({
-    super.key,
+    Key? key,
     required this.videoUrl,
     required this.subtitleUrls,
     required this.title,
@@ -156,226 +41,423 @@ class VideoPlayerScreen extends StatefulWidget {
     required this.serverPort,
     required this.username,
     required this.password,
-    required this.fileSize,
+    this.fileSize = 0,
     this.nextEpisode,
-  });
+  }) : super(key: key);
 
   @override
-  State<VideoPlayerScreen> createState() => _VideoPlayerScreenState();
+  _VideoPlayerScreenState createState() => _VideoPlayerScreenState();
 }
 
-class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProviderStateMixin, WidgetsBindingObserver {
-  VideoPlayerController? _videoPlayerController;
-  ChewieController? _chewieController;
-  bool _isLoading = true;
-  String _error = '';
-  bool _showControls = true;
-  Timer? _hideTimer;
-  List<SubtitleEntry> _subtitles = [];
-  String _currentSubtitleText = '';
-  double _subDelay = 0.0;
-  double _subSize = 24.0;
-  double _volumeBoost = 1.0;
-  Color _subTextColor = Colors.white;
-  Color _subBgColor = Colors.black.withOpacity(0.75);
-  bool _hasError = false;
-  String _errorMessage = '';
-  bool _showRewindIndicator = false;
-  bool _showForwardIndicator = false;
-  Timer? _indicatorTimer;
-  Timer? _subtitleTimer;
-  Timer? _progressSaveTimer;
-  double _scale = 1.0;
-
+class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProviderStateMixin {
+  late final Player player = Player();
+  late final VideoController controller = VideoController(player);
+  final FocusNode _rootFocusNode = FocusNode();
+  
   late AnimationController _controlsAnimationController;
   late Animation<double> _controlsOpacity;
   late AnimationController _capsuleSlideController;
   late Animation<Offset> _capsuleSlideAnimation;
   late AnimationController _progressController;
+  late AnimationController _skipIntroProgressController;
+
+  Map<String, dynamic>? _metadata;
+  bool _showSkipIntro = false;
+  bool _isAutoSkipping = false;
+  Map<String, int>? _currentIntro;
+
+  List<SubtitleEntry> _subtitles = [];
+  String? _selectedSubtitle;
+  double _subtitleFontSize = 20.0;
+  double _subtitleDelaySeconds = 0.0;
+  double _subtitleHeight = 60.0;
+  bool _isGlassSubtitle = true;
+  double _playbackSpeed = 1.0;
+  Color _subtitleColor = Colors.white;
+  bool _autoSkipIntro = false;
+
+  double _audioBoostFactor = 1.0;
+  bool _isIndicatorVisible = false;
+  String _indicatorText = "";
+  IconData _indicatorIcon = Icons.volume_up;
+
+  bool _isLoading = true;
+  bool _isBuffering = false;
+  bool _controlsVisible = true;
+  double _scale = 1.0;
+  bool _showRewindIndicator = false;
+  bool _showForwardIndicator = false;
+
+  Timer? _hideControlsTimer;
+  Timer? _progressSaveTimer;
+  Timer? _indicatorTimer;
+  Timer? _nextEpisodeTimer;
+  Timer? _actionIndicatorTimer;
+  Timer? _castHeartbeatTimer;
+  Timer? _castStatusTimer;
 
   bool _showNextEpisodeOverlay = false;
-  Timer? _nextEpisodeTimer;
   bool _nextEpisodeCancelled = false;
+  final Color _purpleGlow = const Color(0xFFD866FF);
+
+  bool _isDragging = false;
+  double _dragValue = 0.0;
+  double? _initialTimeBeforeDrag;
+  bool _isHoveringX = false;
+  bool _isCasting = false;
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
-    WakelockPlus.enable();
+    MediaKit.ensureInitialized();
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     SystemChrome.setPreferredOrientations([
       DeviceOrientation.landscapeLeft,
       DeviceOrientation.landscapeRight,
     ]);
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-
-    _controlsAnimationController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 300),
-    );
+    _loadSettings();
+    _controlsAnimationController = AnimationController(vsync: this, duration: const Duration(milliseconds: 300));
     _controlsOpacity = Tween<double>(begin: 0.0, end: 1.0).animate(_controlsAnimationController);
-
-    _capsuleSlideController = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 1),
-    );
-    _capsuleSlideAnimation = Tween<Offset>(
-      begin: const Offset(0, -2.0),
-      end: Offset.zero,
-    ).animate(CurvedAnimation(
-      parent: _capsuleSlideController,
-      curve: Curves.easeOutCubic,
-    ));
-
-    _progressController = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 5),
-    );
-
+    _capsuleSlideController = AnimationController(vsync: this, duration: const Duration(milliseconds: 800));
+    _capsuleSlideAnimation = Tween<Offset>(begin: const Offset(0, -2.0), end: Offset.zero).animate(CurvedAnimation(parent: _capsuleSlideController, curve: Curves.easeOutCubic));
+    _progressController = AnimationController(vsync: this, duration: const Duration(seconds: 5));
+    _skipIntroProgressController = AnimationController(vsync: this, duration: const Duration(seconds: 1));
     _initializePlayer();
+    _startCastHeartbeat();
   }
 
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    super.didChangeAppLifecycleState(state);
-    if (state == AppLifecycleState.resumed) {
-      _videoPlayerController?.play();
+  void _startCastHeartbeat() {
+    _castHeartbeatTimer = Timer.periodic(const Duration(seconds: 2), (timer) {
+      _sendHeartbeat();
+    });
+  }
+
+  Future<void> _sendHeartbeat() async {
+    if (!player.state.playing || _isCasting) return;
+    final String auth = 'Basic ${base64Encode(utf8.encode('${widget.username}:${widget.password}'))}';
+    final int position = player.state.position.inSeconds;
+    try {
+      await http.post(
+        Uri.parse("http://${widget.serverIp}:${widget.serverPort}/api/cast/heartbeat"),
+        headers: {'Authorization': auth, 'Content-Type': 'application/json'},
+        body: json.encode({'timestamp': position}),
+      );
+    } catch (e) {}
+  }
+
+  Future<void> _loadSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _isGlassSubtitle = prefs.getBool('isGlassSubtitle') ?? true;
+      _playbackSpeed = prefs.getDouble('playbackSpeed') ?? 1.0;
+      _subtitleFontSize = prefs.getDouble('subtitleFontSize') ?? 20.0;
+      _subtitleDelaySeconds = prefs.getDouble('subtitleDelaySeconds') ?? 0.0;
+      _subtitleHeight = prefs.getDouble('subtitleHeight') ?? 60.0;
+      _subtitleColor = Color(prefs.getInt('subtitleColor') ?? Colors.white.value);
+      _autoSkipIntro = prefs.getBool('autoSkipIntro') ?? false;
+      _audioBoostFactor = prefs.getDouble('audioBoostFactor') ?? 1.0;
+    });
+  }
+
+  Future<void> _saveSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('isGlassSubtitle', _isGlassSubtitle);
+    await prefs.setDouble('playbackSpeed', _playbackSpeed);
+    await prefs.setDouble('subtitleFontSize', _subtitleFontSize);
+    await prefs.setDouble('subtitleDelaySeconds', _subtitleDelaySeconds);
+    await prefs.setDouble('subtitleHeight', _subtitleHeight);
+    await prefs.setInt('subtitleColor', _subtitleColor.value);
+    await prefs.setBool('autoSkipIntro', _autoSkipIntro);
+    await prefs.setDouble('audioBoostFactor', _audioBoostFactor);
+  }
+
+  Future<void> _fetchMetadata() async {
+    try {
+      final String videoPath = _getRelativeVideoPath();
+      if (videoPath.isEmpty) return;
+      final url = "http://${widget.serverIp}:${widget.serverPort}/api/movie-assets?path=${Uri.encodeComponent(videoPath)}";
+      final auth = 'Basic ${base64Encode(utf8.encode('${widget.username}:${widget.password}'))}';
+      final response = await http.get(Uri.parse(url), headers: {'Authorization': auth});
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        if (data['success'] == true && data['metadata'] != null) {
+          setState(() {
+            _metadata = data['metadata'];
+            _identifyIntro();
+          });
+        }
+      }
+    } catch (e) {}
+  }
+
+  void _identifyIntro() {
+    if (_metadata == null || _metadata!['episodes'] == null) return;
+    final List episodes = _metadata!['episodes'];
+    final currentEp = episodes.firstWhere((ep) => ep['title'] == widget.title, orElse: () => null);
+    if (currentEp != null && currentEp['intro'] != null) {
+      setState(() {
+        _currentIntro = {
+          'start': currentEp['intro']['start'],
+          'end': currentEp['intro']['end'],
+        };
+      });
     }
   }
 
   Future<void> _initializePlayer() async {
+    setState(() {
+      _isLoading = true;
+      _isBuffering = true;
+    });
     try {
-      final bool isLocal = !widget.videoUrl.startsWith('http');
+      final String rawAuth = base64Encode(utf8.encode('${widget.username}:${widget.password}'));
+      final String authenticatedUrl = widget.videoUrl.contains('?') ? '${widget.videoUrl}&auth=$rawAuth' : '${widget.videoUrl}?auth=$rawAuth';
 
-      if (isLocal) {
-        String rawPath = widget.videoUrl;
-        if (rawPath.startsWith('file://')) {
-          rawPath = rawPath.replaceFirst('file://', '');
-        }
-        if (rawPath.contains('?')) {
-          rawPath = rawPath.split('?')[0];
-        }
-        rawPath = Uri.decodeFull(rawPath);
-        final cleanPath = p.normalize(rawPath);
-        final file = File(cleanPath);
-        
-        if (!file.existsSync()) {
-          throw Exception("File not found: $cleanPath");
-        }
+      _fetchMetadata();
 
-        _videoPlayerController = VideoPlayerController.networkUrl(
-          Uri.parse('file://$cleanPath'),
-          videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
-        );
-      } else {
-        final auth = 'Basic ${base64Encode(utf8.encode('${widget.username}:${widget.password}'))}';
-        final base64Token = auth.split(' ')[1];
-        final separator = widget.videoUrl.contains('?') ? '&' : '?';
-        final finalUrl = '${widget.videoUrl}${separator}auth=$base64Token';
-        
-        _videoPlayerController = VideoPlayerController.networkUrl(
-          Uri.parse(finalUrl),
-          httpHeaders: {
-            'Authorization': auth,
-            'ngrok-skip-browser-warning': 'true',
-          },
-          videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
-        );
-      }
+      player.stream.buffering.listen((event) {
+        setState(() => _isBuffering = event);
+      });
 
-      await _videoPlayerController!.initialize();
-      
-      _chewieController = ChewieController(
-        videoPlayerController: _videoPlayerController!,
-        autoPlay: true,
-        looping: false,
-        aspectRatio: _videoPlayerController!.value.aspectRatio,
-        showControls: false,
-        allowFullScreen: true,
-      );
+      player.stream.position.listen((pos) {
+        _videoListener(pos);
+      });
 
-      _videoPlayerController!.addListener(_videoListener);
-      
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-        });
-        _videoPlayerController!.play();
-        _videoPlayerController!.setVolume(_volumeBoost);
-        _startHideTimer();
-        _startProgressSaveTimer();
-        
-        final progress = await VideoProgressManager.getProgress(widget.videoUrl, widget.username);
-        if (progress != null && progress.position > 5000) {
-          _showResumeDialog(progress);
-        }
-      }
-
-      if (widget.subtitleUrls.isNotEmpty) {
-        _loadSubtitles(widget.subtitleUrls.first);
-      }
-
-      _subtitleTimer = Timer.periodic(const Duration(milliseconds: 100), (timer) {
-        if (mounted && _videoPlayerController != null && _videoPlayerController!.value.isPlaying) {
-          _updateSubtitles();
+      player.stream.playing.listen((playing) {
+        if (playing && mounted) {
+          _startHideTimer();
         }
       });
 
+      player.stream.completed.listen((completed) {
+        if (completed && widget.nextEpisode != null) {
+          _playNextEpisode();
+        }
+      });
+
+      await player.open(Media(authenticatedUrl, httpHeaders: {
+        'Authorization': 'Basic $rawAuth',
+        'User-Agent': 'Mozilla/5.0',
+      }));
+
+      await player.setSubtitleTrack(SubtitleTrack.no());
+      await player.setRate(_playbackSpeed);
+      player.setVolume(_audioBoostFactor * 100.0);
+
+      final progress = await VideoProgressManager.getProgress(
+        videoPath: _getRelativeVideoPath(),
+        title: widget.title,
+        serverIp: widget.serverIp,
+        serverPort: widget.serverPort,
+        authHeader: 'Basic $rawAuth',
+      );
+
+      if (progress != null && progress.position > 5000) {
+        _showResumeDialog(progress);
+      }
+
+      if (widget.subtitleUrls.isNotEmpty) _selectSubtitle(widget.subtitleUrls[0]);
+
+      setState(() {
+        _isLoading = false;
+        _isBuffering = false;
+      });
+
+      _startHideTimer();
+      _startProgressSaveTimer();
+      player.play();
     } catch (e) {
       if (mounted) {
         setState(() {
           _isLoading = false;
-          _hasError = true;
-          _errorMessage = e.toString();
+          _isBuffering = false;
         });
       }
     }
   }
 
-  void _videoListener() {
-    if (_videoPlayerController == null) return;
-    
-    if (_videoPlayerController!.value.hasError) {
-      if (mounted) {
-        setState(() {
-          _hasError = true;
-          _errorMessage = _videoPlayerController!.value.errorDescription ?? 'Playback Error';
-        });
+  void _videoListener(Duration position) {
+    if (!mounted) return;
+    if (_currentIntro != null) {
+      final int start = _currentIntro!['start']!;
+      final int end = _currentIntro!['end']!;
+      final int currentSec = position.inSeconds;
+      if (end > start && currentSec >= start && currentSec <= end) {
+        if (!_showSkipIntro && !_isAutoSkipping) {
+          setState(() => _showSkipIntro = true);
+          if (_autoSkipIntro) {
+            _skipIntro();
+          } else {
+            _startIntroProgressAnimation(start, end, position);
+          }
+        }
+      } else {
+        if (_showSkipIntro) setState(() => _showSkipIntro = false);
+        if (_isAutoSkipping && currentSec > end) setState(() => _isAutoSkipping = false);
       }
+    }
+    final duration = player.state.duration;
+    if (widget.nextEpisode != null && !_nextEpisodeCancelled && duration.inSeconds > 0 && (duration.inSeconds - position.inSeconds) <= 20 && !_showNextEpisodeOverlay) {
+      _triggerNextEpisodeOverlay();
+    }
+  }
+
+  void _startIntroProgressAnimation(int start, int end, Duration position) {
+    final int totalMs = (end - start) * 1000;
+    if (totalMs <= 0) return;
+    final int elapsedMs = (position.inMilliseconds - (start * 1000)).clamp(0, totalMs);
+    final int remainingMs = totalMs - elapsedMs;
+    _skipIntroProgressController.value = elapsedMs / totalMs;
+    _skipIntroProgressController.animateTo(1.0, duration: Duration(milliseconds: remainingMs), curve: Curves.linear);
+  }
+
+  Future<void> _skipIntro() async {
+    if (_currentIntro != null && !_isAutoSkipping) {
+      setState(() {
+        _isAutoSkipping = true;
+        _showSkipIntro = false;
+      });
+      final targetSeconds = _currentIntro!['end']!;
+      await player.seek(Duration(seconds: targetSeconds));
+      _skipIntroProgressController.stop();
+      _skipIntroProgressController.value = 0.0;
+    }
+  }
+
+  void _togglePlay() {
+    if (player.state.playing) {
+      player.pause();
+    } else {
+      player.play();
+      _startHideTimer();
+    }
+    setState(() {});
+    _showControls();
+  }
+
+  void _showActionIndicator(bool isRewind) {
+    _actionIndicatorTimer?.cancel();
+    setState(() { _showRewindIndicator = isRewind; _showForwardIndicator = !isRewind; });
+    _actionIndicatorTimer = Timer(const Duration(milliseconds: 800), () {
+      if (mounted) setState(() { _showRewindIndicator = false; _showForwardIndicator = false; });
+    });
+  }
+
+  void _showResumeDialog(VideoProgress progress) {
+    Future.delayed(Duration.zero, () {
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => AlertDialog(
+          backgroundColor: const Color(0xFF1A1A1A),
+          title: const Text("Resume Playback?", style: TextStyle(color: Colors.white)),
+          content: Text("Continue watching from ${_formatDuration(Duration(milliseconds: progress.position))}?"),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context), child: const Text("START OVER")),
+            ElevatedButton(
+              onPressed: () { player.seek(Duration(milliseconds: progress.position)); Navigator.pop(context); },
+              child: const Text("RESUME"),
+            ),
+          ],
+        ),
+      );
+    });
+  }
+
+  Future<void> _seekToRelative(Duration relativeOffset) async {
+    final int currentMs = player.state.position.inMilliseconds;
+    final int totalDurationMs = player.state.duration.inMilliseconds;
+    final int clampedPosMs = (currentMs + relativeOffset.inMilliseconds).clamp(0, totalDurationMs);
+    await player.seek(Duration(milliseconds: clampedPosMs));
+    _saveProgress();
+    _showControls();
+  }
+
+  void _saveProgress() {
+    final auth = 'Basic ${base64Encode(utf8.encode('${widget.username}:${widget.password}'))}';
+    VideoProgressManager.saveProgress(
+      videoPath: _getRelativeVideoPath(),
+      title: widget.title,
+      serverIp: widget.serverIp,
+      serverPort: widget.serverPort,
+      authHeader: auth,
+      position: player.state.position.inMilliseconds,
+      duration: player.state.duration.inMilliseconds,
+    );
+  }
+
+  Future<void> _selectSubtitle(String? subtitleUrl) async {
+    if (subtitleUrl == null) {
+      setState(() { _selectedSubtitle = null; _subtitles = []; });
       return;
     }
-
-    _checkForVideoCompletion();
-    if (mounted) setState(() {});
+    try {
+      final auth = 'Basic ${base64Encode(utf8.encode('${widget.username}:${widget.password}'))}';
+      final response = await http.get(Uri.parse(subtitleUrl), headers: {'Authorization': auth}).timeout(const Duration(seconds: 5));
+      if (response.statusCode == 200) {
+        String decodedContent;
+        try {
+          decodedContent = utf8.decode(response.bodyBytes);
+        } catch (e) {
+          decodedContent = latin1.decode(response.bodyBytes);
+        }
+        final parsed = subtitleUrl.toLowerCase().endsWith('.vtt') 
+            ? SubtitleHelper.parseVTT(decodedContent) 
+            : SubtitleHelper.parseSRT(decodedContent);
+        setState(() { _selectedSubtitle = subtitleUrl; _subtitles = parsed; });
+      }
+    } catch (e) {}
+    _showControls();
   }
 
-  void _checkForVideoCompletion() {
-    if (_videoPlayerController == null || !_videoPlayerController!.value.isInitialized || _nextEpisodeCancelled) return;
-    
-    final duration = _videoPlayerController!.value.duration;
-    final position = _videoPlayerController!.value.position;
-    final remainingTime = duration - position;
-    
-    if (remainingTime.inSeconds <= 20 && widget.nextEpisode != null && !_showNextEpisodeOverlay) {
-      setState(() {
-        _showNextEpisodeOverlay = true;
-      });
-      
-      _capsuleSlideController.forward().then((_) {
-        _progressController.forward();
-        _nextEpisodeTimer?.cancel();
-        _nextEpisodeTimer = Timer(const Duration(seconds: 5), () {
-          if (mounted && _showNextEpisodeOverlay) {
-            _playNextEpisode();
-          }
-        });
-      });
-    }
+  void _showIndicatorUI() {
+    _indicatorTimer?.cancel();
+    setState(() => _isIndicatorVisible = true);
+    _indicatorTimer = Timer(const Duration(seconds: 2), () { if (mounted) setState(() => _isIndicatorVisible = false); });
+  }
+
+  void _showControls() {
+    if (_controlsVisible) return;
+    _hideControlsTimer?.cancel();
+    setState(() {
+      _controlsVisible = true;
+    });
+    _controlsAnimationController.forward();
+    _startHideTimer();
+  }
+
+  void _hideControls() {
+    if (!_controlsVisible || _isDragging) return;
+    setState(() {
+      _controlsVisible = false;
+    });
+    _controlsAnimationController.reverse();
+  }
+
+  void _startHideTimer() {
+    _hideControlsTimer?.cancel();
+    _hideControlsTimer = Timer(const Duration(seconds: 3), () {
+      if (mounted && player.state.playing && !_isDragging) {
+        _hideControls();
+      }
+    });
+  }
+
+  void _startProgressSaveTimer() {
+    _progressSaveTimer = Timer.periodic(const Duration(seconds: 10), (t) => _saveProgress());
+  }
+
+  void _triggerNextEpisodeOverlay() {
+    setState(() => _showNextEpisodeOverlay = true);
+    _capsuleSlideController.forward();
+    _progressController.forward();
+    _nextEpisodeTimer = Timer(const Duration(seconds: 5), () { if (mounted && _showNextEpisodeOverlay) _playNextEpisode(); });
   }
 
   void _playNextEpisode() {
     if (widget.nextEpisode != null) {
       _nextEpisodeTimer?.cancel();
-      _saveCurrentPosition();
+      _saveProgress();
       Navigator.of(context).pop({'action': 'playNext', 'episode': widget.nextEpisode});
     }
   }
@@ -385,503 +467,741 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
     _capsuleSlideController.reverse();
     _progressController.stop();
     _progressController.reset();
-    setState(() {
-      _showNextEpisodeOverlay = false;
-      _nextEpisodeCancelled = true;
-    });
+    setState(() { _showNextEpisodeOverlay = false; _nextEpisodeCancelled = true; });
   }
 
-  Future<void> _loadSubtitles(String url) async {
-    try {
-      final bool isLocal = !url.startsWith('http');
-      String content = '';
-
-      if (isLocal) {
-        String rawPath = url;
-        if (rawPath.startsWith('file://')) rawPath = rawPath.replaceFirst('file://', '');
-        if (rawPath.contains('?')) rawPath = rawPath.split('?')[0];
-        rawPath = Uri.decodeFull(rawPath);
-        content = await File(p.normalize(rawPath)).readAsString();
-      } else {
-        final auth = 'Basic ${base64Encode(utf8.encode('${widget.username}:${widget.password}'))}';
-        final response = await http.get(Uri.parse(url), headers: {
-          'Authorization': auth,
-          'ngrok-skip-browser-warning': 'true',
-        });
-        if (response.statusCode == 200) {
-          content = response.body;
-        }
-      }
-
-      if (content.isNotEmpty) {
-        _parseSRT(content);
-      }
-    } catch (e) {}
-  }
-
-  void _parseSRT(String content) {
-    _subtitles.clear();
-    final exp = RegExp(
-      r'(\d+)\r?\n(\d{1,2}:\d{2}:\d{1,2},\d{2,3}) --> (\d{1,2}:\d{2}:\d{1,2},\d{2,3})\r?\n([\s\S]*?)(?=\r?\n\r?\n\d+\r?\n|$)',
-      multiLine: true,
-    );
-
-    for (final match in exp.allMatches(content)) {
-      _subtitles.add(SubtitleEntry(
-        start: _parseT(match.group(2)!),
-        end: _parseT(match.group(3)!),
-        text: match.group(4)!.replaceAll(RegExp(r'<[^>]*>'), '').trim(),
-      ));
-    }
-  }
-
-  Duration _parseT(String t) {
-    final parts = t.split(':');
-    final secParts = parts[2].split(',');
-    return Duration(
-      hours: int.parse(parts[0]),
-      minutes: int.parse(parts[1]),
-      seconds: int.parse(secParts[0]),
-      milliseconds: int.parse(secParts[1]),
-    );
-  }
-
-  void _updateSubtitles() {
-    if (_subtitles.isEmpty || _videoPlayerController == null) return;
-    final now = _videoPlayerController!.value.position + Duration(milliseconds: (_subDelay * 1000).toInt());
-    final entry = _subtitles.firstWhere(
-      (e) => now >= e.start && now <= e.end,
-      orElse: () => SubtitleEntry(start: Duration.zero, end: Duration.zero, text: ''),
-    );
-
-    if (_currentSubtitleText != entry.text) {
-      if (mounted) {
-        setState(() {
-          _currentSubtitleText = entry.text;
-        });
-      }
-    }
-  }
-
-  void _startHideTimer() {
-    _hideTimer?.cancel();
-    _hideTimer = Timer(const Duration(seconds: 3), () {
-      if (mounted && _videoPlayerController != null && _videoPlayerController!.value.isPlaying) {
-        setState(() {
-          _showControls = false;
-          _controlsAnimationController.reverse();
-        });
-      }
-    });
-  }
-
-  void _toggleControls() {
-    setState(() {
-      _showControls = !_showControls;
-      if (_showControls) {
-        _controlsAnimationController.forward();
-        _startHideTimer();
-      } else {
-        _controlsAnimationController.reverse();
-      }
-    });
-  }
-
-  void _showSeekIndicator(bool isRewind) {
-    _indicatorTimer?.cancel();
-    setState(() {
-      _showRewindIndicator = isRewind;
-      _showForwardIndicator = !isRewind;
-    });
-    _indicatorTimer = Timer(const Duration(milliseconds: 500), () {
-      if (mounted) {
-        setState(() {
-          _showRewindIndicator = false;
-          _showForwardIndicator = false;
-        });
-      }
-    });
-  }
-
-  void _saveCurrentPosition() {
-    if (_videoPlayerController != null && _videoPlayerController!.value.isInitialized) {
-      VideoProgressManager.saveProgress(
-        widget.videoUrl,
-        widget.username,
-        _videoPlayerController!.value.position.inMilliseconds,
-        _videoPlayerController!.value.duration.inMilliseconds,
-      );
-    }
-  }
-
-  void _startProgressSaveTimer() {
-    _progressSaveTimer?.cancel();
-    _progressSaveTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
-      _saveCurrentPosition();
-    });
-  }
-
-  void _showResumeDialog(VideoProgress progress) {
-    final minutes = (progress.position / 60000).floor();
-    final seconds = ((progress.position % 60000) / 1000).floor();
-    final timeStr = '${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
-
+  Future<void> _showCastDialog() async {
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: Colors.black87,
-        title: const Text('Resume Playback', style: TextStyle(color: Colors.white)),
-        content: Text('Resume from $timeStr?', style: const TextStyle(color: Colors.white70)),
-        actions: [
-          TextButton(
-            child: const Text('Start Over', style: TextStyle(color: Colors.grey)),
-            onPressed: () {
-              Navigator.pop(context);
-              _videoPlayerController?.seekTo(Duration.zero);
-            },
-          ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF8A2BE2)),
-            child: const Text('Resume'),
-            onPressed: () {
-              Navigator.pop(context);
-              _videoPlayerController?.seekTo(Duration(milliseconds: progress.position));
-            },
-          ),
-        ],
-      ),
-    );
-  }
-
-  String _formatDuration(Duration d) {
-    final m = d.inMinutes;
-    final s = d.inSeconds % 60;
-    return '$m:${s.toString().padLeft(2, '0')}';
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: GestureDetector(
-        onTap: _toggleControls,
-        onDoubleTapDown: (details) {
-          if (_videoPlayerController == null) return;
-          final width = MediaQuery.of(context).size.width;
-          if (details.globalPosition.dx < width / 2) {
-            _videoPlayerController!.seekTo(_videoPlayerController!.value.position - const Duration(seconds: 10));
-            _showSeekIndicator(true);
-          } else {
-            _videoPlayerController!.seekTo(_videoPlayerController!.value.position + const Duration(seconds: 10));
-            _showSeekIndicator(false);
-          }
-        },
-        child: Stack(
-          children: [
-            Center(
-              child: _hasError
-                  ? Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        const Icon(Icons.error_outline, color: Colors.red, size: 60),
-                        const SizedBox(height: 20),
-                        Text(_errorMessage, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white70)),
-                        const SizedBox(height: 20),
-                        ElevatedButton(onPressed: _initializePlayer, child: const Text("Retry")),
-                      ],
-                    )
-                  : (_videoPlayerController != null && _videoPlayerController!.value.isInitialized)
-                      ? AspectRatio(
-                          aspectRatio: _videoPlayerController!.value.aspectRatio,
-                          child: VideoPlayer(_videoPlayerController!),
-                        )
-                      : const CircularProgressIndicator(color: Color(0xFF8A2BE2)),
-            ),
-            if (_showRewindIndicator) Center(child: Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.black54, shape: BoxShape.circle), child: const Icon(Icons.replay_10, color: Colors.white, size: 50))),
-            if (_showForwardIndicator) Center(child: Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.black54, shape: BoxShape.circle), child: const Icon(Icons.forward_10, color: Colors.white, size: 50))),
-            if (_currentSubtitleText.isNotEmpty && !_hasError)
-              Positioned(
-                bottom: _showControls ? 150 : 30,
-                left: 20,
-                right: 20,
-                child: Center(
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                    decoration: BoxDecoration(color: _subBgColor, borderRadius: BorderRadius.circular(12)),
-                    child: Text(
-                      _currentSubtitleText,
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: _subTextColor, fontSize: _subSize, fontWeight: FontWeight.w500, shadows: const [Shadow(blurRadius: 4, color: Colors.black, offset: Offset(2, 2))]),
-                    ),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          return AlertDialog(
+            backgroundColor: const Color(0xFF1A1A1A),
+            title: const Text("Select TV Device", style: TextStyle(color: Colors.white)),
+            content: FutureBuilder<List<String>>(
+              future: _fetchDevices(),
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const SizedBox(height: 100, child: Center(child: CircularProgressIndicator(color: Colors.purpleAccent)));
+                }
+                if (snapshot.hasError || snapshot.data == null || snapshot.data!.isEmpty) {
+                  return const Text("No active TV apps found.", style: TextStyle(color: Colors.white70));
+                }
+                return SizedBox(
+                  width: double.maxFinite,
+                  child: ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: snapshot.data!.length,
+                    itemBuilder: (context, index) {
+                      final deviceName = snapshot.data![index];
+                      return ListTile(
+                        title: Text(deviceName, style: const TextStyle(color: Colors.white)),
+                        onTap: () {
+                          Navigator.pop(context);
+                          _triggerCast(deviceName);
+                        },
+                      );
+                    },
                   ),
-                ),
-              ),
-            if (_showNextEpisodeOverlay && widget.nextEpisode != null)
-              SlideTransition(
-                position: _capsuleSlideAnimation,
-                child: Align(
-                  alignment: Alignment.topCenter,
-                  child: Padding(
-                    padding: const EdgeInsets.only(top: 40),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(100),
-                      child: BackdropFilter(
-                        filter: ImageFilter.blur(sigmaX: 25, sigmaY: 25),
-                        child: Container(
-                          width: 550,
-                          height: 80,
-                          decoration: BoxDecoration(
-                            color: Colors.black.withOpacity(0.85),
-                            borderRadius: BorderRadius.circular(100),
-                            border: Border.all(color: const Color(0xFFD866FF).withOpacity(0.6), width: 1.5),
-                          ),
-                          child: Stack(
-                            children: [
-                              AnimatedBuilder(
-                                animation: _progressController,
-                                builder: (context, child) => Container(width: 550 * _progressController.value, decoration: BoxDecoration(gradient: LinearGradient(colors: [Colors.transparent, const Color(0xFFD866FF).withOpacity(0.8)]))),
-                              ),
-                              Padding(
-                                padding: const EdgeInsets.only(left: 35, right: 12),
-                                child: Row(
-                                  children: [
-                                    Expanded(
-                                      child: Column(
-                                        mainAxisAlignment: MainAxisAlignment.center,
-                                        crossAxisAlignment: CrossAxisAlignment.start,
-                                        children: [
-                                          const Text('UP NEXT', style: TextStyle(color: Color(0xFFD866FF), fontSize: 10, fontWeight: FontWeight.w900, letterSpacing: 2)),
-                                          Text(widget.nextEpisode!['name'] ?? 'Unknown', style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600), overflow: TextOverflow.ellipsis),
-                                        ],
-                                      ),
-                                    ),
-                                    ElevatedButton(
-                                      style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFD866FF), foregroundColor: Colors.white, shape: const StadiumBorder()),
-                                      onPressed: _playNextEpisode,
-                                      child: const Text('PLAY NOW', style: TextStyle(fontWeight: FontWeight.w800)),
-                                    ),
-                                    IconButton(icon: const Icon(Icons.close, color: Colors.white), onPressed: _cancelNextEpisode),
-                                  ],
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            FadeTransition(
-              opacity: _controlsOpacity,
-              child: IgnorePointer(
-                ignoring: !_showControls,
-                child: Stack(
-                  children: [
-                    Container(decoration: BoxDecoration(gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Colors.black.withOpacity(0.8), Colors.transparent, Colors.transparent, Colors.black.withOpacity(0.8)], stops: const [0.0, 0.2, 0.8, 1.0]))),
-                    Positioned(
-                      top: 40,
-                      left: 20,
-                      right: 20,
-                      child: Row(
-                        children: [
-                          IconButton(icon: const Icon(Icons.arrow_back, color: Colors.white, size: 30), onPressed: () => Navigator.pop(context)),
-                          const SizedBox(width: 10),
-                          Expanded(child: Text(widget.title, style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold), overflow: TextOverflow.ellipsis)),
-                          IconButton(icon: const Icon(Icons.subtitles, color: Colors.white), onPressed: _showSubtitlePicker),
-                          IconButton(icon: const Icon(Icons.accessibility, color: Colors.white), onPressed: _showAccessibilityDialog),
-                        ],
-                      ),
-                    ),
-                    Center(
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          IconButton(icon: const Icon(Icons.replay_10, color: Color(0xFF8A2BE2), size: 60), onPressed: () => _videoPlayerController?.seekTo(_videoPlayerController!.value.position - const Duration(seconds: 10))),
-                          const SizedBox(width: 60),
-                          IconButton(
-                            icon: Icon(_videoPlayerController?.value.isPlaying == true ? Icons.pause_circle_filled : Icons.play_circle_filled, color: const Color(0xFF8A2BE2), size: 90),
-                            onPressed: () {
-                              setState(() {
-                                if (_videoPlayerController!.value.isPlaying) {
-                                  _videoPlayerController!.pause();
-                                } else {
-                                  _videoPlayerController!.play();
-                                }
-                              });
-                              _startHideTimer();
-                            },
-                          ),
-                          const SizedBox(width: 60),
-                          IconButton(icon: const Icon(Icons.forward_10, color: Color(0xFF8A2BE2), size: 60), onPressed: () => _videoPlayerController?.seekTo(_videoPlayerController!.value.position + const Duration(seconds: 10))),
-                        ],
-                      ),
-                    ),
-                    Positioned(
-                      bottom: 40,
-                      left: 20,
-                      right: 20,
-                      child: Column(
-                        children: [
-                          if (_videoPlayerController != null)
-                            Slider(
-                              value: _videoPlayerController!.value.position.inMilliseconds.toDouble().clamp(0, _videoPlayerController!.value.duration.inMilliseconds.toDouble()),
-                              min: 0.0,
-                              max: _videoPlayerController!.value.duration.inMilliseconds.toDouble(),
-                              activeColor: const Color(0xFF8A2BE2),
-                              onChanged: (v) {
-                                _videoPlayerController!.seekTo(Duration(milliseconds: v.toInt()));
-                                _startHideTimer();
-                              },
-                            ),
-                          Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 16),
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                Text(_formatDuration(_videoPlayerController?.value.position ?? Duration.zero), style: const TextStyle(color: Colors.white)),
-                                Text(_formatDuration(_videoPlayerController?.value.duration ?? Duration.zero), style: const TextStyle(color: Colors.white)),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  void _showSubtitlePicker() async {
-    final bool isLocal = !widget.videoUrl.startsWith('http');
-    if (isLocal) {
-      final dir = Directory(p.dirname(widget.videoUrl));
-      if (!await dir.exists()) return;
-      final files = dir.listSync().where((f) => f.path.endsWith('.srt')).toList();
-      showDialog(
-        context: context,
-        builder: (context) => AlertDialog(
-          backgroundColor: const Color(0xFF111111),
-          title: const Text('Subtitles', style: TextStyle(color: Colors.white)),
-          content: SizedBox(
-            width: double.maxFinite,
-            child: ListView.builder(
-              shrinkWrap: true,
-              itemCount: files.length + 1,
-              itemBuilder: (context, i) {
-                if (i == 0) return ListTile(title: const Text('None', style: TextStyle(color: Colors.white)), onTap: () { setState(() => _subtitles.clear()); Navigator.pop(context); });
-                final s = files[i - 1];
-                return ListTile(title: Text(p.basename(s.path), style: const TextStyle(color: Colors.white)), onTap: () { _loadSubtitles(s.path); Navigator.pop(context); });
+                );
               },
             ),
-          ),
-        ),
-      );
-      return;
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(context), child: const Text("CANCEL", style: TextStyle(color: Colors.white54))),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Future<List<String>> _fetchDevices() async {
+    final auth = 'Basic ${base64Encode(utf8.encode('${widget.username}:${widget.password}'))}';
+    try {
+      final response = await http.get(
+        Uri.parse("http://${widget.serverIp}:${widget.serverPort}/api/cast/devices"),
+        headers: {'Authorization': auth, 'ngrok-skip-browser-warning': 'true'},
+      ).timeout(const Duration(seconds: 5));
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        if (data['success'] == true) {
+          return List<String>.from(data['devices']);
+        }
+      }
+    } catch (e) {}
+    return [];
+  }
+
+  Future<void> _triggerCast(String targetDevice) async {
+    final String videoPath = _getRelativeVideoPath();
+    final String auth = 'Basic ${base64Encode(utf8.encode('${widget.username}:${widget.password}'))}';
+    final int timestamp = player.state.position.inSeconds;
+    String? subPath;
+    if (_selectedSubtitle != null) {
+      try {
+        subPath = Uri.decodeFull(Uri.parse(_selectedSubtitle!).queryParameters['path'] ?? "");
+      } catch (e) {}
     }
 
-    final auth = 'Basic ${base64Encode(utf8.encode('${widget.username}:${widget.password}'))}';
-    final videoPath = Uri.parse(widget.videoUrl).queryParameters['path'] ?? '';
-    final response = await http.get(
-      Uri.parse('http://${widget.serverIp}:${widget.serverPort}/api/find-subtitles?path=${Uri.encodeComponent(videoPath)}'),
-      headers: {'Authorization': auth, 'ngrok-skip-browser-warning': 'true'},
-    );
-
-    if (response.statusCode == 200) {
+    try {
+      final response = await http.post(
+        Uri.parse("http://${widget.serverIp}:${widget.serverPort}/api/cast/command"),
+        headers: {'Authorization': auth, 'Content-Type': 'application/json'},
+        body: json.encode({
+          'action': 'START_CAST',
+          'videoPath': videoPath,
+          'timestamp': timestamp,
+          'title': widget.title,
+          'targetDevice': targetDevice,
+          'subtitlePath': subPath ?? ""
+        }),
+      );
       final data = json.decode(response.body);
       if (data['success'] == true) {
-        final subs = List<Map<String, dynamic>>.from(data['subtitles']);
-        showDialog(
-          context: context,
-          builder: (context) => AlertDialog(
-            backgroundColor: const Color(0xFF111111),
-            title: const Text('Subtitles', style: TextStyle(color: Colors.white)),
-            content: SizedBox(
-              width: double.maxFinite,
-              child: ListView.builder(
-                shrinkWrap: true,
-                itemCount: subs.length + 1,
-                itemBuilder: (context, i) {
-                  if (i == 0) return ListTile(title: const Text('None', style: TextStyle(color: Colors.white)), onTap: () { setState(() => _subtitles.clear()); Navigator.pop(context); });
-                  final s = subs[i - 1];
-                  return ListTile(title: Text(s['name'], style: const TextStyle(color: Colors.white)), onTap: () { _loadSubtitles('http://${widget.serverIp}:${widget.serverPort}/api/subtitle?path=${Uri.encodeComponent(s['path'])}'); Navigator.pop(context); });
-                },
-              ),
-            ),
-          ),
-        );
+        player.pause();
+        setState(() => _isCasting = true);
+        _hideControls();
+        _startCastPolling();
       }
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Cast failed"), backgroundColor: Colors.redAccent));
+    }
+  }
+
+  void _startCastPolling() {
+    _castStatusTimer?.cancel();
+    _castStatusTimer = Timer.periodic(const Duration(seconds: 3), (timer) async {
+      final auth = 'Basic ${base64Encode(utf8.encode('${widget.username}:${widget.password}'))}';
+      try {
+        final response = await http.get(
+          Uri.parse("http://${widget.serverIp}:${widget.serverPort}/api/cast/status"),
+          headers: {'Authorization': auth, 'ngrok-skip-browser-warning': 'true'},
+        );
+        final data = json.decode(response.body);
+        if (data['success'] == true && data['timestamp'] != null) {
+          final int remotePos = data['timestamp'];
+          player.seek(Duration(seconds: remotePos));
+        }
+      } catch (e) {}
+    });
+  }
+
+  Future<void> _stopCast() async {
+    final auth = 'Basic ${base64Encode(utf8.encode('${widget.username}:${widget.password}'))}';
+    try {
+      final statusRes = await http.get(
+        Uri.parse("http://${widget.serverIp}:${widget.serverPort}/api/cast/status"),
+        headers: {'Authorization': auth, 'ngrok-skip-browser-warning': 'true'},
+      );
+      final statusData = json.decode(statusRes.body);
+      int returnTime = player.state.position.inSeconds;
+      if (statusData['success'] == true && statusData['timestamp'] != null) {
+        returnTime = statusData['timestamp'];
+      }
+
+      await http.post(
+        Uri.parse("http://${widget.serverIp}:${widget.serverPort}/api/cast/command"),
+        headers: {'Authorization': auth, 'Content-Type': 'application/json'},
+        body: json.encode({'action': 'STOP_CAST'}),
+      );
+
+      _castStatusTimer?.cancel();
+      setState(() => _isCasting = false);
+      await player.seek(Duration(seconds: returnTime));
+      player.play();
+      _showControls();
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Failed to stop cast"), backgroundColor: Colors.redAccent));
     }
   }
 
   void _showAccessibilityDialog() {
     showDialog(
       context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          backgroundColor: const Color(0xFF111111),
-          title: const Text('Accessibility', style: TextStyle(color: Colors.white)),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _buildAccRow('Volume Boost', '${_volumeBoost.toStringAsFixed(1)}x', () {
-                setState(() { _volumeBoost = math.max(1.0, _volumeBoost - 1.0); _videoPlayerController?.setVolume(_volumeBoost); });
-                setDialogState(() {});
-              }, () {
-                setState(() { _volumeBoost = math.min(20.0, _volumeBoost + 1.0); _videoPlayerController?.setVolume(_volumeBoost); });
-                setDialogState(() {});
-              }),
-              _buildAccRow('Font Size', '${_subSize.toInt()}px', () { setState(() => _subSize -= 2); setDialogState(() {}); }, () { setState(() => _subSize += 2); setDialogState(() {}); }),
-              _buildAccRow('Delay', '${_subDelay.toStringAsFixed(1)}s', () { setState(() => _subDelay -= 0.5); setDialogState(() {}); }, () { setState(() => _subDelay += 0.5); setDialogState(() {}); }),
-            ],
+      builder: (context) => AccessibilityDialog(
+        playbackSpeed: _playbackSpeed,
+        isGlassSubtitle: _isGlassSubtitle,
+        audioBoostFactor: _audioBoostFactor,
+        subtitleFontSize: _subtitleFontSize,
+        subtitleDelaySeconds: _subtitleDelaySeconds,
+        subtitleHeight: _subtitleHeight,
+        scale: _scale,
+        subtitleColor: _subtitleColor,
+        autoSkipIntro: _autoSkipIntro,
+        onPlaybackSpeedChanged: (speed) { 
+          setState(() { 
+            _playbackSpeed = double.parse(speed.toStringAsFixed(1));
+            player.setRate(_playbackSpeed); 
+          }); 
+          _indicatorIcon = Icons.speed;
+          _indicatorText = "${_playbackSpeed.toStringAsFixed(1)}x";
+          _showIndicatorUI();
+          _saveSettings(); 
+        },
+        onGlassSubtitleChanged: (val) { setState(() => _isGlassSubtitle = val); _saveSettings(); },
+        onAudioBoostChanged: (boost) { 
+          _audioBoostFactor = boost;
+          player.setVolume(_audioBoostFactor * 100.0);
+          _indicatorIcon = Icons.bolt;
+          _indicatorText = "${(_audioBoostFactor * 100).round()}%";
+          _showIndicatorUI();
+          _saveSettings();
+        },
+        onSubtitleFontSizeChanged: (size) { setState(() => _subtitleFontSize = size); _saveSettings(); },
+        onSubtitleDelayChanged: (delay) { 
+          setState(() => _subtitleDelaySeconds = double.parse(delay.toStringAsFixed(1))); 
+          _indicatorIcon = Icons.subtitles;
+          _indicatorText = "Delay: ${_subtitleDelaySeconds.toStringAsFixed(1)}s";
+          _showIndicatorUI();
+          _saveSettings(); 
+        },
+        onSubtitleHeightChanged: (h) { setState(() => _subtitleHeight = h); _saveSettings(); },
+        onScaleChanged: (s) => setState(() => _scale = s),
+        onSubtitleColorChanged: (color) { setState(() => _subtitleColor = color); _saveSettings(); },
+        onAutoSkipIntroChanged: (val) { setState(() => _autoSkipIntro = val); _saveSettings(); },
+        onSetIntroTiming: (type) async {
+          final String videoPath = _getRelativeVideoPath();
+          final String auth = 'Basic ${base64Encode(utf8.encode('${widget.username}:${widget.password}'))}';
+          final double currentTime = player.state.position.inSeconds.toDouble();
+          try {
+            await http.post(
+              Uri.parse("http://${widget.serverIp}:${widget.serverPort}/api/save-episode-metadata"),
+              headers: {'Authorization': auth, 'Content-Type': 'application/json'},
+              body: json.encode({ 'videoPath': videoPath, 'videoTitle': widget.title, 'type': type, 'time': currentTime}),
+            );
+          } catch (e) {}
+        },
+        onReportIssue: () {},
+      ),
+    );
+  }
+
+  void _showSubtitleDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => Dialog(
+        backgroundColor: Colors.transparent,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(24),
+          child: BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 15, sigmaY: 15),
+            child: Container(
+              width: 400,
+              padding: const EdgeInsets.all(24),
+              decoration: BoxDecoration(
+                color: Colors.black.withOpacity(0.8),
+                borderRadius: BorderRadius.circular(24),
+                border: Border.all(color: Colors.white.withOpacity(0.1), width: 1.5),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text('SUBTITLES', style: TextStyle(color: Colors.purpleAccent, fontSize: 18, fontWeight: FontWeight.w900, letterSpacing: 2)),
+                  const SizedBox(height: 20),
+                  Flexible(
+                    child: ListView(
+                      shrinkWrap: true,
+                      children: [
+                        ListTile(
+                          title: const Text('None', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                          trailing: _selectedSubtitle == null ? const Icon(Icons.check_circle, color: Colors.purpleAccent) : null,
+                          onTap: () { _selectSubtitle(null); Navigator.pop(context); },
+                        ),
+                        ...widget.subtitleUrls.map((url) {
+                          String fileName = Uri.decodeFull(url).split('path=').last.split('/').last;
+                          bool isSelected = _selectedSubtitle == url;
+                          return ListTile(
+                            title: Text(fileName, style: TextStyle(color: isSelected ? Colors.purpleAccent : Colors.white, fontWeight: isSelected ? FontWeight.bold : FontWeight.normal)),
+                            trailing: isSelected ? const Icon(Icons.check_circle, color: Colors.purpleAccent) : null,
+                            onTap: () { _selectSubtitle(url); Navigator.pop(context); },
+                          );
+                        }).toList(),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.white10,
+                      minimumSize: const Size(double.infinity, 50),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    ),
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text('CLOSE', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                  ),
+                ],
+              ),
+            ),
           ),
-          actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close', style: TextStyle(color: Color(0xFF8A2BE2))))],
         ),
       ),
     );
   }
 
-  Widget _buildAccRow(String label, String val, VoidCallback onDec, VoidCallback onInc) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Text(label, style: const TextStyle(color: Colors.white)),
-          Row(
+  @override
+  Widget build(BuildContext context) {
+    return KeyboardListener(
+      focusNode: _rootFocusNode,
+      autofocus: true,
+      onKeyEvent: (event) {
+        if (event is KeyDownEvent) {
+          if (event.logicalKey == LogicalKeyboardKey.space) _togglePlay();
+          if (event.logicalKey == LogicalKeyboardKey.arrowLeft) _seekToRelative(const Duration(seconds: -10));
+          if (event.logicalKey == LogicalKeyboardKey.arrowRight) _seekToRelative(const Duration(seconds: 10));
+        }
+      },
+      child: Scaffold(
+        backgroundColor: Colors.black,
+        body: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () {
+            if (_controlsVisible) {
+              _hideControls();
+            } else {
+              _showControls();
+            }
+          },
+          onDoubleTapDown: (details) {
+            final screenWidth = MediaQuery.of(context).size.width;
+            if (details.globalPosition.dx < screenWidth / 2) {
+              _seekToRelative(const Duration(seconds: -10));
+              _showActionIndicator(true);
+            } else {
+              _seekToRelative(const Duration(seconds: 10));
+              _showActionIndicator(false);
+            }
+          },
+          child: Stack(
             children: [
-              IconButton(icon: const Icon(Icons.remove, color: Colors.white), onPressed: onDec),
-              Text(val, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-              IconButton(icon: const Icon(Icons.add, color: Colors.white), onPressed: onInc),
+              Center(
+                child: Transform.scale(
+                  scale: _scale, 
+                  child: Video(
+                    controller: controller,
+                    controls: NoVideoControls,
+                  )
+                ),
+              ),
+              if (_isCasting) _buildCastOverlay(),
+              if (_showRewindIndicator || _showForwardIndicator)
+                Center(
+                  child: Container(
+                    padding: const EdgeInsets.all(20),
+                    decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(50)),
+                    child: Icon(_showRewindIndicator ? Icons.replay_10 : Icons.forward_10, color: Colors.white, size: 60),
+                  ),
+                ),
+              StreamBuilder<Duration>(
+                stream: player.stream.position,
+                builder: (context, snapshot) {
+                  if (_subtitles.isEmpty || _isCasting) return const SizedBox.shrink();
+                  final currentMs = player.state.position.inMilliseconds;
+                  final delayMs = (_subtitleDelaySeconds * 1000).toInt();
+                  final adjustedPos = Duration(milliseconds: currentMs - delayMs);
+                  String text = '';
+                  for (final entry in _subtitles) {
+                    if (adjustedPos >= entry.start && adjustedPos <= entry.end) {
+                      text = entry.text;
+                      break;
+                    }
+                  }
+                  if (text.isEmpty) return const SizedBox.shrink();
+                  return Positioned(
+                    bottom: _subtitleHeight, left: 20, right: 20,
+                    child: IgnorePointer(
+                      child: Center(
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(12),
+                          child: BackdropFilter(
+                            filter: ImageFilter.blur(sigmaX: _isGlassSubtitle ? 15 : 0, sigmaY: _isGlassSubtitle ? 15 : 0),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                              decoration: BoxDecoration(
+                                color: _isGlassSubtitle ? _subtitleColor.withOpacity(0.15) : _subtitleColor.withOpacity(0.8),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Text(
+                                text, 
+                                style: TextStyle(color: Colors.white, fontSize: _subtitleFontSize, fontWeight: FontWeight.bold, height: 1.2), 
+                                textAlign: TextAlign.center
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+              if (_showSkipIntro && !_isCasting) _buildSkipIntroButton(),
+              if (_isIndicatorVisible)
+                Positioned(
+                  top: 40, right: 20,
+                  child: Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(8)),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      Icon(_indicatorIcon, color: Colors.white, size: 18),
+                      const SizedBox(width: 8),
+                      Text(_indicatorText, style: const TextStyle(color: Colors.white, fontSize: 14)),
+                    ]),
+                  ),
+                ),
+              if (_showNextEpisodeOverlay && widget.nextEpisode != null && !_isCasting) _buildNextEpisodeCapsule(),
+              if (_controlsVisible && !_isCasting) _buildMainControls(),
+              if ((_isBuffering || _isLoading) && !_isCasting) const Center(child: CircularProgressIndicator(color: Colors.purpleAccent)),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCastOverlay() {
+    return Container(
+      color: Colors.black,
+      width: double.infinity,
+      height: double.infinity,
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const Text(
+            "Casted to TV",
+            style: TextStyle(
+              color: Colors.purpleAccent,
+              fontSize: 28,
+              fontWeight: FontWeight.w900,
+              shadows: [Shadow(color: Colors.purpleAccent, blurRadius: 20)],
+            ),
+          ),
+          const SizedBox(height: 30),
+          ElevatedButton(
+            onPressed: _stopCast,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.white,
+              foregroundColor: Colors.black,
+              padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 15),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(50)),
+            ),
+            child: const Text("Stop Casting", style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
           ),
         ],
       ),
     );
   }
 
+  Widget _buildNextEpisodeCapsule() {
+    return SlideTransition(
+      position: _capsuleSlideAnimation,
+      child: Align(
+        alignment: Alignment.topCenter,
+        child: Padding(
+          padding: const EdgeInsets.only(top: 20),
+          child: Container(
+            width: 300, height: 60,
+            decoration: BoxDecoration(color: Colors.black.withOpacity(0.8), borderRadius: BorderRadius.circular(30)),
+            child: Row(children: [
+              const SizedBox(width: 20),
+              Expanded(child: Text('UP NEXT: ${path.basenameWithoutExtension(widget.nextEpisode!['name'])}', overflow: TextOverflow.ellipsis)),
+              IconButton(icon: const Icon(Icons.close), onPressed: _cancelNextEpisode),
+              const SizedBox(width: 10),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSkipIntroButton() {
+    return Positioned(
+      bottom: 100, right: 40,
+      child: GestureDetector(
+        onTap: _skipIntro,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+          decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(30), border: Border.all(color: Colors.purple)),
+          child: const Text("SKIP INTRO", style: TextStyle(fontWeight: FontWeight.bold)),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMainControls() {
+    return FadeTransition(
+      opacity: _controlsOpacity,
+      child: Container(
+        color: Colors.black45,
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
+              child: Row(
+                children: [
+                  IconButton(icon: const Icon(Icons.arrow_back, color: Colors.white), onPressed: () => Navigator.pop(context)),
+                  const SizedBox(width: 10),
+                  Expanded(child: Text(path.basenameWithoutExtension(widget.title), style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold), overflow: TextOverflow.ellipsis)),
+                  IconButton(icon: const Icon(Icons.cast, color: Colors.white), onPressed: _showCastDialog),
+                  IconButton(icon: const Icon(Icons.accessibility, color: Colors.white), onPressed: _showAccessibilityDialog),
+                  IconButton(icon: const Icon(Icons.subtitles, color: Colors.white), onPressed: _showSubtitleDialog),
+                ],
+              ),
+            ),
+            const Spacer(),
+            Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+              IconButton(icon: const Icon(Icons.replay_10, size: 40, color: Colors.white), onPressed: () => _seekToRelative(const Duration(seconds: -10))),
+              const SizedBox(width: 40),
+              IconButton(
+                icon: Icon(player.state.playing ? Icons.pause_circle_filled : Icons.play_circle_filled, size: 80, color: Colors.purpleAccent), 
+                onPressed: _togglePlay
+              ),
+              const SizedBox(width: 40),
+              IconButton(icon: const Icon(Icons.forward_10, size: 40, color: Colors.white), onPressed: () => _seekToRelative(const Duration(seconds: 10))),
+            ]),
+            const Spacer(),
+            _buildProgressBar(),
+            const SizedBox(height: 20),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _getRelativeVideoPath() {
+    try { return Uri.parse(widget.videoUrl).queryParameters['path'] ?? ""; } catch (e) { return ""; }
+  }
+
+  String _formatDuration(Duration d) {
+    String twoDigits(int n) => n.toString().padLeft(2, "0");
+    if (d.inHours > 0) return "${d.inHours}:${twoDigits(d.inMinutes.remainder(60))}:${twoDigits(d.inSeconds.remainder(60))}";
+    return "${twoDigits(d.inMinutes.remainder(60))}:${twoDigits(d.inSeconds.remainder(60))}";
+  }
+
+    Widget _buildProgressBar() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 0, 20, 0),
+      child: StreamBuilder<Duration>(
+        stream: player.stream.position,
+        builder: (context, snapshot) {
+          final double duration = player.state.duration.inMilliseconds.toDouble();
+          final double position = _isDragging ? _dragValue : player.state.position.inMilliseconds.toDouble();
+          final double fraction = duration > 0 ? (position / duration).clamp(0.0, 1.0) : 0.0;
+
+          return LayoutBuilder(builder: (context, constraints) {
+            final double width = constraints.maxWidth;
+            final double thumbRadius = 10.0;
+            final double trackPadding = thumbRadius;
+            final double usableWidth = width - (trackPadding * 2);
+            final double thumbX = trackPadding + (fraction * usableWidth);
+            
+            final double buttonSize = 36.0;
+            final double buttonTop = 30.0;
+
+            return Listener(
+              onPointerMove: (event) {
+                if (_isDragging) {
+                  RenderBox box = context.findRenderObject() as RenderBox;
+                  Offset localPos = box.globalToLocal(event.position);
+                  
+                  double dx = localPos.dx - thumbX;
+                  double dy = localPos.dy - (buttonTop + buttonSize / 2);
+                  double distance = math.sqrt(dx * dx + dy * dy);
+
+                  bool isHovering = distance <= (buttonSize / 2) + 20;
+                  if (isHovering != _isHoveringX) {
+                    setState(() => _isHoveringX = isHovering);
+                  }
+                }
+              },
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Stack(
+                    clipBehavior: Clip.none,
+                    alignment: Alignment.center,
+                    children: [
+                      SliderTheme(
+                        data: SliderTheme.of(context).copyWith(
+                          trackHeight: 4,
+                          activeTrackColor: Colors.purpleAccent,
+                          inactiveTrackColor: Colors.white24,
+                          thumbColor: Colors.white,
+                          overlayColor: Colors.transparent,
+                          trackShape: const RectangularSliderTrackShape(),
+                          overlayShape: SliderComponentShape.noOverlay,
+                          thumbShape: RoundSliderThumbShape(enabledThumbRadius: thumbRadius, pressedElevation: 0),
+                        ),
+                        child: Slider(
+                          value: position.clamp(0.0, duration > 0 ? duration : 1.0),
+                          min: 0.0,
+                          max: duration > 0 ? duration : 1.0,
+                          onChanged: (val) {
+                            if (!_isDragging) {
+                              _initialTimeBeforeDrag = player.state.position.inMilliseconds.toDouble();
+                            }
+                            setState(() {
+                              _isDragging = true;
+                              _dragValue = val;
+                            });
+                            _showControls();
+                          },
+                          onChangeEnd: (val) {
+                            if (_isHoveringX) {
+                              if (_initialTimeBeforeDrag != null) {
+                                player.seek(Duration(milliseconds: _initialTimeBeforeDrag!.toInt()));
+                              }
+                            } else {
+                              player.seek(Duration(milliseconds: val.toInt()));
+                              _saveProgress();
+                            }
+                            setState(() {
+                              _isDragging = false;
+                              _isHoveringX = false;
+                            });
+                            _startHideTimer();
+                          },
+                        ),
+                      ),
+                      if (_isDragging) ...[
+                        Positioned(
+                          left: (thumbX - 80).clamp(0.0, width - 160),
+                          bottom: 45,
+                          child: _buildThumbnailPreview(position),
+                        ),
+                        Positioned(
+                          left: thumbX - (buttonSize / 2),
+                          top: buttonTop,
+                          child: Container(
+                            width: buttonSize,
+                            height: buttonSize,
+                            decoration: BoxDecoration(
+                              color: _isHoveringX ? Colors.purpleAccent : Colors.black.withOpacity(0.8),
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                color: _isHoveringX ? Colors.white : Colors.white24, 
+                                width: 1.5
+                              ),
+                              boxShadow: [
+                                if (_isHoveringX)
+                                  BoxShadow(
+                                    color: Colors.purpleAccent.withOpacity(0.6),
+                                    blurRadius: 15,
+                                    spreadRadius: 2,
+                                  ),
+                              ],
+                            ),
+                            child: const Icon(Icons.close, color: Colors.white, size: 18),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                  const SizedBox(height: 35),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(_formatDuration(Duration(milliseconds: position.toInt())), 
+                        style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
+                      Text(_formatDuration(player.state.duration), 
+                        style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                    ],
+                  ),
+                ],
+              ),
+            );
+          });
+        },
+      ),
+    );
+  }
+
+  Widget _buildThumbnailPreview(double positionMs) {
+    final String videoPath = _getRelativeVideoPath();
+    final auth = 'Basic ${base64Encode(utf8.encode('${widget.username}:${widget.password}'))}';
+    final String thumbUrl = "http://${widget.serverIp}:${widget.serverPort}/api/thumbnail?path=${Uri.encodeComponent(videoPath)}&time=${(positionMs / 1000).toStringAsFixed(1)}";
+    
+    return Container(
+      width: 160,
+      height: 90,
+      decoration: BoxDecoration(
+        color: Colors.black,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.purpleAccent, width: 2),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(6),
+        child: Image.network(
+          thumbUrl,
+          headers: {'Authorization': auth},
+          fit: BoxFit.cover,
+          errorBuilder: (c, e, s) => const Icon(Icons.image_not_supported, color: Colors.white24),
+        ),
+      ),
+    );
+  }
+
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    _saveCurrentPosition();
-    _hideTimer?.cancel();
-    _subtitleTimer?.cancel();
+    _saveProgress();
     _progressSaveTimer?.cancel();
+    _hideControlsTimer?.cancel();
     _nextEpisodeTimer?.cancel();
-    _videoPlayerController?.removeListener(_videoListener);
-    _videoPlayerController?.dispose();
-    _chewieController?.dispose();
+    _indicatorTimer?.cancel();
+    _actionIndicatorTimer?.cancel();
+    _castHeartbeatTimer?.cancel();
+    _castStatusTimer?.cancel();
+    player.dispose();
     _controlsAnimationController.dispose();
     _capsuleSlideController.dispose();
     _progressController.dispose();
-    SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp, DeviceOrientation.portraitDown, DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]);
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-    WakelockPlus.disable();
+    _skipIntroProgressController.dispose();
+    _rootFocusNode.dispose();
+    SystemChrome.setPreferredOrientations([
+      DeviceOrientation.portraitUp,
+    ]);
     super.dispose();
+  }
+}
+
+class SubtitleHelper {
+  static List<SubtitleEntry> parseSRT(String content) {
+    List<SubtitleEntry> subtitles = [];
+    if (content.startsWith('\uFEFF')) content = content.substring(1);
+    final blocks = content.trim().split(RegExp(r'\n\s*\n'));
+    for (var block in blocks) {
+      final lines = block.trim().split('\n');
+      if (lines.length < 3) continue;
+      final index = int.tryParse(lines[0].trim());
+      if (index == null) continue;
+      final timeLine = lines[1].trim();
+      final timeMatch = RegExp(r'(\d{1,2}:\d{2}:\d{1,2}[.,]\d+)\s*--+>\s*(\d{1,2}:\d{2}:\d{1,2}[.,]\d+)').firstMatch(timeLine);
+      if (timeMatch != null) {
+        final start = _parseSrtTime(timeMatch.group(1)!);
+        final end = _parseSrtTime(timeMatch.group(2)!);
+        final text = lines.sublist(2).join('\n').replaceAll(RegExp(r'<[^>]*>'), '');
+        subtitles.add(SubtitleEntry(index: index, start: start, end: end, text: text));
+      }
+    }
+    return subtitles;
+  }
+
+  static List<SubtitleEntry> parseVTT(String content) {
+    String sanitized = content.replaceFirst(RegExp(r'^WEBVTT[^\n]*'), '').trim();
+    return parseSRT(sanitized);
+  }
+
+  static Duration _parseSrtTime(String timeString) {
+    final parts = timeString.trim().replaceAll(',', '.').split(':');
+    if (parts.length == 3) {
+      final hours = int.parse(parts[0]);
+      final minutes = int.parse(parts[1]);
+      final secondsParts = parts[2].split('.');
+      final seconds = int.parse(secondsParts[0]);
+      int milliseconds = 0;
+      if (secondsParts.length > 1) {
+        milliseconds = int.parse(secondsParts[1].padRight(3, '0').substring(0, 3));
+      }
+      return Duration(hours: hours, minutes: minutes, seconds: seconds, milliseconds: milliseconds);
+    }
+    return Duration.zero;
   }
 }
