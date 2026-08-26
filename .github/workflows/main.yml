@@ -14,16 +14,15 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
-          flutter-version: '3.44.2'   # pin Flutter version for consistency
+          flutter-version: '3.44.2'   # pin version for consistency
 
       - name: Prepare iOS Environment
         run: |
           flutter pub get
           flutter precache --ios
-          # Generate iOS configs without full build
           flutter build ios --config-only --no-codesign
 
-      - name: Clean Pods
+      - name: Clean & Install Pods
         run: |
           rm -rf ios/Pods ios/Podfile.lock
           cd ios
