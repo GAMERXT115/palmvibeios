@@ -14,29 +14,23 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
-          flutter-version: '3.41.9'
 
       - name: Get dependencies
-        run: flutter pub get
-
-      - name: Fix Deployment Target
         run: |
-          find ios -name "project.pbxproj" -exec sed -i '' 's/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]*/IPHONEOS_DEPLOYMENT_TARGET = 13.0/g' {} +
-          if [ -f ios/Podfile ]; then
-            sed -i '' "s/platform :ios, '[0-9.]*'/platform :ios, '13.0'/g" ios/Podfile
-          fi
+          flutter pub get
+          flutter precache --ios
 
       - name: Build iOS
         run: flutter build ios --release --no-codesign
 
-      - name: Prepare Artifact
+      - name: Create IPA
         run: |
           mkdir -p Payload
           mv build/ios/iphoneos/Runner.app Payload/
-          zip -r Runner.ipa Payload
+          zip -r PalmVibe.ipa Payload
 
-      - name: Upload Runner
+      - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Runner-App
-          path: Runner.ipa
+          name: PalmVibe-IPA
+          path: PalmVibe.ipa
