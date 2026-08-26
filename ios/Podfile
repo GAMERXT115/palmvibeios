@@ -3,9 +3,12 @@ require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelpe
 platform :ios, '15.0'
 
 target 'Runner' do
-  # Remove use_frameworks! completely
-  # use_frameworks! :linkage => :static
+  use_frameworks! :linkage => :static
   use_modular_headers!
+
+  pod 'Firebase/Core', :modular_headers => true
+pod 'Firebase/Database', :modular_headers => true
+
 
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
 end
