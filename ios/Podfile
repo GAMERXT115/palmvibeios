@@ -1,11 +1,11 @@
-load File.expand_path(File.join('Flutter', 'podhelper.rb'), __dir__)
+flutter_root = ENV['FLUTTER_ROOT'] || File.expand_path('..', File.dirname(File.realpath(__FILE__)))
+load File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelper.rb'), flutter_root)
 
 platform :ios, '15.0'
 
 target 'Runner' do
   use_frameworks!
   use_modular_headers!
-
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
 end
 
