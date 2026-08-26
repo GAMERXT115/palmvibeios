@@ -1,4 +1,4 @@
-load File.join(File.dirname(File.realpath(__FILE__)), 'Flutter', 'podhelper.rb')
+require_relative File.join('Flutter', 'podhelper.rb')
 
 platform :ios, '13.0'
 
