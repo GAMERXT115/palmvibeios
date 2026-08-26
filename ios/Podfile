@@ -1,10 +1,17 @@
-load File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelper.rb'), ENV['FLUTTER_ROOT'])
+# CocoaPods Podfile for Palm Vibe iOS
+require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelper.rb'), ENV['FLUTTER_ROOT'])
 
 platform :ios, '15.0'
 
 target 'Runner' do
+  # Use static frameworks with modular headers
   use_frameworks! :linkage => :static
   use_modular_headers!
+
+  # Explicitly set Firebase pods to modular headers
+  pod 'Firebase/Core', :modular_headers => true
+  pod 'Firebase/Database', :modular_headers => true
+
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
 end
 
@@ -12,8 +19,11 @@ post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
     target.build_configurations.each do |config|
+      # Allow non-modular includes inside framework modules
       config.build_settings['CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES'] = 'YES'
+      # Ensure module definitions are generated
       config.build_settings['DEFINES_MODULE'] = 'YES'
+      # Set minimum iOS deployment target
       config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0'
     end
   end
