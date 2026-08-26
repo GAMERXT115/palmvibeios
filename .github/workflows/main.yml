@@ -1,31 +1,46 @@
 name: Build iOS Runner
-
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: macos-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Flutter
+      - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
+          flutter-version: '3.44.2'   # pin version for consistency
 
-      - name: Install dependencies
-        run: flutter pub get
+      - name: Prepare iOS Environment
+        run: |
+          flutter pub get
+          flutter precache --ios
+          flutter build ios --config-only --no-codesign
 
-      - name: Build IPA
-        run: flutter build ipa --no-codesign
+      - name: Clean & Install Pods
+        run: |
+          rm -rf ios/Pods ios/Podfile.lock
+          cd ios
+          pod repo update
+          pod install --repo-update
+          cd ..
+
+      - name: Build iOS Release
+        run: flutter build ios --release --no-codesign
+
+      - name: Create IPA
+        run: |
+          mkdir -p Payload
+          mv build/ios/iphoneos/Runner.app Payload/
+          zip -r PalmVibe.ipa Payload
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: PalmVibe-IPA
-          path: build/ios/ipa/*.ipa
+          path: PalmVibe.ipa
