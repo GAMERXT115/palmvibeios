@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as path;
 import 'dart:convert';
 import 'dart:io';
+import 'dart:async';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:youtube_player_flutter/youtube_player_flutter.dart';
 import 'video_progress_manager.dart';
@@ -133,7 +134,7 @@ class _MoviesGridWidgetState extends State<MoviesGridWidget> {
   }
 }
 
-class MovieCard extends StatelessWidget {
+class MovieCard extends StatefulWidget {
   final Map<String, dynamic> movie;
   final Function(Map<String, dynamic>) getPosterUrl;
   final String authHeader;
@@ -156,11 +157,80 @@ class MovieCard extends StatelessWidget {
   }) : super(key: key);
 
   @override
+  State<MovieCard> createState() => _MovieCardState();
+}
+
+class _MovieCardState extends State<MovieCard> {
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    final String itemPath = widget.movie['path'] ?? '';
+    if (itemPath.contains('2COMINGSOON')) {
+      _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
+        if (mounted) setState(() {});
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  String _getCountdown(String releaseDate) {
+    try {
+      final monthsMap = {
+        'january': 1, 'february': 2, 'march': 3, 'april': 4, 'may': 5, 'june': 6,
+        'july': 7, 'august': 8, 'september': 9, 'october': 10, 'november': 11, 'december': 12
+      };
+
+      List<String> parts = releaseDate.toLowerCase().split(' ');
+      if (parts.length < 3) return releaseDate;
+
+      int? month = monthsMap[parts[0]];
+      int? day = int.tryParse(parts[1]);
+      int? year = int.tryParse(parts[2]);
+
+      if (month == null || day == null || year == null) return releaseDate;
+
+      DateTime releaseDateTime = DateTime(year, month, day, 0, 0, 0);
+      DateTime now = DateTime.now();
+      Duration diff = releaseDateTime.difference(now);
+
+      if (diff.isNegative) return "RELEASED";
+
+      if (diff.inDays >= 365) {
+        int years = (diff.inDays / 365).floor();
+        return "In $years Year${years > 1 ? 's' : ''}";
+      }
+      if (diff.inDays >= 30) {
+        int months = (diff.inDays / 30).floor();
+        return "In $months Month${months > 1 ? 's' : ''}";
+      }
+      if (diff.inDays >= 1) {
+        return "In ${diff.inDays} Day${diff.inDays > 1 ? 's' : ''}";
+      }
+      if (diff.inHours >= 1) {
+        return "In ${diff.inHours} Hour${diff.inHours > 1 ? 's' : ''}";
+      }
+      if (diff.inMinutes >= 1) {
+        return "In ${diff.inMinutes} Minute${diff.inMinutes > 1 ? 's' : ''}";
+      }
+      return "In ${diff.inSeconds} Second${diff.inSeconds > 1 ? 's' : ''}";
+    } catch (e) {
+      return releaseDate;
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final String itemPath = movie['path'] ?? '';
+    final String itemPath = widget.movie['path'] ?? '';
     String title = path.basenameWithoutExtension(itemPath);
 
-    if (movie['type'] == 'file') {
+    if (widget.movie['type'] == 'file') {
       String parent = path.basename(path.dirname(itemPath));
       List<String> rootFolders = ['Movies', 'Bollywood', 'Hollywood', '1RECENTLY ADDED', '2COMINGSOON', 'Marvel', 'DC'];
       if (!rootFolders.contains(parent) && parent.isNotEmpty) {
@@ -168,10 +238,23 @@ class MovieCard extends StatelessWidget {
       }
     }
 
-    final posterUrl = getPosterUrl(movie);
+    final posterUrl = widget.getPosterUrl(widget.movie);
+    final String? year = widget.movie['year']?.toString();
+    final String? releaseDateStr = widget.movie['release']?.toString();
+    final bool isComingSoon = itemPath.contains('2COMINGSOON');
+
+    String displayLabel = "";
+    bool isReleased = false;
+
+    if (isComingSoon && releaseDateStr != null) {
+      displayLabel = _getCountdown(releaseDateStr);
+      isReleased = displayLabel == "RELEASED";
+    } else if (year != null) {
+      displayLabel = year;
+    }
 
     return GestureDetector(
-      onTap: onTap,
+      onTap: widget.onTap,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -188,17 +271,33 @@ class MovieCard extends StatelessWidget {
                   children: [
                     Image.network(
                       posterUrl,
-                      headers: {'Authorization': authHeader, 'ngrok-skip-browser-warning': 'true'},
+                      headers: {'Authorization': widget.authHeader, 'ngrok-skip-browser-warning': 'true'},
                       fit: BoxFit.cover,
                       errorBuilder: (c, e, s) => Container(color: Colors.grey[900]),
                     ),
+                    if (displayLabel.isNotEmpty)
+                      Positioned(
+                        top: 8,
+                        right: 8,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: isReleased ? const Color(0xFF8A2BE2) : Colors.black.withOpacity(0.8),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            displayLabel,
+                            style: const TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                      ),
                     FutureBuilder<VideoProgress?>(
                       future: VideoProgressManager.getProgress(
                         videoPath: itemPath,
                         title: title,
-                        serverIp: serverIp,
-                        serverPort: serverPort,
-                        authHeader: authHeader,
+                        serverIp: widget.serverIp,
+                        serverPort: widget.serverPort,
+                        authHeader: widget.authHeader,
                       ),
                       builder: (context, snapshot) {
                         if (snapshot.hasData && snapshot.data != null) {
@@ -464,7 +563,12 @@ class _MovieDetailsModalState extends State<MovieDetailsModal> {
                 children: [
                   Text(displayName, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white)),
                   const SizedBox(height: 5),
-                  Text('${metadata['year'] ?? ''} • ${metadata['quality'] ?? 'HD'}', style: const TextStyle(color: Color(0xFFB19CD9), fontSize: 13)),
+                  Text(
+                    isComingSoon 
+                      ? (metadata['release'] ?? 'Release Date TBD')
+                      : '${metadata['year'] ?? ''} • ${metadata['quality'] ?? 'HD'}',
+                    style: const TextStyle(color: Color(0xFFB19CD9), fontSize: 13),
+                  ),
                   const SizedBox(height: 15),
                   Text(metadata['description'] ?? '', style: const TextStyle(color: Colors.white70, fontSize: 14, height: 1.4)),
                   const SizedBox(height: 25),
