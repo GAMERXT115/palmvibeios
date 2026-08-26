@@ -3,9 +3,8 @@ load File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelper.r
 platform :ios, '15.0'
 
 target 'Runner' do
-  use_frameworks!
+  use_frameworks! :linkage => :static
   use_modular_headers!
-
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
 end
 
@@ -16,8 +15,6 @@ post_install do |installer|
       config.build_settings['CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES'] = 'YES'
       config.build_settings['DEFINES_MODULE'] = 'YES'
       config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0'
-      config.build_settings['OTHER_CFLAGS'] = '$(inherited) -Wno-error=non-modular-include'
-      config.build_settings['OTHER_SWIFT_FLAGS'] = '$(inherited) -Xcc -Wno-error=non-modular-include'
     end
   end
 end
