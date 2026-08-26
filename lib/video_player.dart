@@ -142,6 +142,17 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
     });
   }
 
+  void _syncPiPSubtitles() {
+  GlobalVideoManager().updateSubtitleData(
+    entries: _subtitles,
+    fontSize: _subtitleFontSize,
+    delay: _subtitleDelaySeconds,
+    glass: _isGlassSubtitle,
+    color: _subtitleColor,
+  );
+}
+
+
   Future<void> _sendHeartbeat() async {
     final player = GlobalVideoManager().player;
     if (player == null || !player.state.playing || _isCasting) return;
@@ -417,28 +428,30 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
   }
 
   Future<void> _selectSubtitle(String? subtitleUrl) async {
-    if (subtitleUrl == null) {
-      setState(() { _selectedSubtitle = null; _subtitles = []; });
-      return;
-    }
-    try {
-      final auth = 'Basic ${base64Encode(utf8.encode('${widget.username}:${widget.password}'))}';
-      final response = await http.get(Uri.parse(subtitleUrl), headers: {'Authorization': auth}).timeout(const Duration(seconds: 5));
-      if (response.statusCode == 200) {
-        String decodedContent;
-        try {
-          decodedContent = utf8.decode(response.bodyBytes);
-        } catch (e) {
-          decodedContent = latin1.decode(response.bodyBytes);
-        }
-        final parsed = subtitleUrl.toLowerCase().endsWith('.vtt') 
-            ? SubtitleHelper.parseVTT(decodedContent) 
-            : SubtitleHelper.parseSRT(decodedContent);
-        setState(() { _selectedSubtitle = subtitleUrl; _subtitles = parsed; });
-      }
-    } catch (e) {}
-    _showControls();
+  if (subtitleUrl == null) {
+    setState(() { _selectedSubtitle = null; _subtitles = []; });
+    _syncPiPSubtitles();
+    return;
   }
+  try {
+    final auth = 'Basic ${base64Encode(utf8.encode('${widget.username}:${widget.password}'))}';
+    final response = await http.get(Uri.parse(subtitleUrl), headers: {'Authorization': auth}).timeout(const Duration(seconds: 5));
+    if (response.statusCode == 200) {
+      String decodedContent;
+      try {
+        decodedContent = utf8.decode(response.bodyBytes);
+      } catch (e) {
+        decodedContent = latin1.decode(response.bodyBytes);
+      }
+      final parsed = subtitleUrl.toLowerCase().endsWith('.vtt') 
+          ? SubtitleHelper.parseVTT(decodedContent) 
+          : SubtitleHelper.parseSRT(decodedContent);
+      setState(() { _selectedSubtitle = subtitleUrl; _subtitles = parsed; });
+      _syncPiPSubtitles();
+    }
+  } catch (e) {}
+  _showControls();
+}
 
   void _showIndicatorUI() {
     _indicatorTimer?.cancel();
@@ -791,13 +804,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
     final controller = GlobalVideoManager().controller;
 
     return PopScope(
-      canPop: false,
-      onPopInvokedWithResult: (didPop, result) async {
-        if (didPop) return;
-        GlobalVideoManager().showPiP(context);
-        Navigator.of(context).pop();
-      },
-      child: KeyboardListener(
+  canPop: false,
+  onPopInvokedWithResult: (didPop, result) async {
+    if (didPop) return;
+    _syncPiPSubtitles();
+    GlobalVideoManager().showPiP(context);
+    Navigator.of(context).pop();
+  },
+  child: KeyboardListener(
         focusNode: _rootFocusNode,
         autofocus: true,
         onKeyEvent: (event) {
@@ -1080,12 +1094,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
               child: Row(
                 children: [
                   IconButton(
-                    icon: const Icon(Icons.arrow_back, color: Colors.white), 
-                    onPressed: () {
-                      GlobalVideoManager().showPiP(context);
-                      Navigator.pop(context);
-                    }
-                  ),
+  icon: const Icon(Icons.arrow_back, color: Colors.white), 
+  onPressed: () {
+    _syncPiPSubtitles();
+    GlobalVideoManager().showPiP(context);
+    Navigator.pop(context);
+  }
+),
+
                   const SizedBox(width: 10),
                   Expanded(child: Text(path.basenameWithoutExtension(widget.title), style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold), overflow: TextOverflow.ellipsis)),
                   IconButton(icon: const Icon(Icons.cast, color: Colors.white), onPressed: _showCastDialog),
