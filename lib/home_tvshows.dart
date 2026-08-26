@@ -5,6 +5,7 @@ import 'video_player.dart';
 import 'dart:ui';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
+import 'package:flutter/services.dart';
 
 class TvShowsWidget extends StatelessWidget {
   final List<Map<String, dynamic>> tvShows;
@@ -244,7 +245,7 @@ class _TvShowDetailWidgetState extends State<TvShowDetailWidget> {
     } catch (e) {}
   }
 
-  @override
+    @override
   Widget build(BuildContext context) {
     final List<Map<String, dynamic>> sortedEpisodes = List<Map<String, dynamic>>.from(widget.episodes);
     sortedEpisodes.sort((a, b) {
@@ -361,17 +362,58 @@ class _TvShowDetailWidgetState extends State<TvShowDetailWidget> {
                 leading: Container(
                   width: 100,
                   height: 60,
-                  decoration: BoxDecoration(
+                  child: ClipRRect(
                     borderRadius: BorderRadius.circular(6),
-                    image: DecorationImage(
-                      image: NetworkImage(
-                        'http://${widget.serverIp}:${widget.serverPort}/api/thumbnail?path=${Uri.encodeComponent(videoPath)}',
-                        headers: {'Authorization': widget.authHeader, 'ngrok-skip-browser-warning': 'true'},
-                      ),
-                      fit: BoxFit.cover,
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        Image.network(
+                          'http://${widget.serverIp}:${widget.serverPort}/api/thumbnail?path=${Uri.encodeComponent(videoPath)}',
+                          headers: {'Authorization': widget.authHeader, 'ngrok-skip-browser-warning': 'true'},
+                          fit: BoxFit.cover,
+                          errorBuilder: (c, e, s) => Container(color: Colors.grey[900]),
+                        ),
+                        const Center(child: Icon(Icons.play_arrow, color: Colors.white, size: 24)),
+                        FutureBuilder<VideoProgress?>(
+                          future: VideoProgressManager.getProgress(
+                            videoPath: videoPath,
+                            title: ep['name'],
+                            serverIp: widget.serverIp,
+                            serverPort: widget.serverPort,
+                            authHeader: widget.authHeader,
+                          ),
+                          builder: (context, snapshot) {
+                            if (snapshot.hasData && snapshot.data != null) {
+                              final double progress = snapshot.data!.percentageWatched;
+                              if (progress > 0.02) {
+                                return Positioned(
+                                  bottom: 0,
+                                  left: 0,
+                                  right: 0,
+                                  child: Container(
+                                    height: 3,
+                                    color: Colors.black54,
+                                    child: Align(
+                                      alignment: Alignment.centerLeft,
+                                      child: FractionallySizedBox(
+                                        widthFactor: progress.clamp(0.0, 1.0),
+                                        child: Container(
+                                          decoration: const BoxDecoration(
+                                            color: Color(0xFF8A2BE2),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              }
+                            }
+                            return const SizedBox.shrink();
+                          },
+                        ),
+                      ],
                     ),
                   ),
-                  child: const Center(child: Icon(Icons.play_arrow, color: Colors.white, size: 24)),
                 ),
                 title: Text(
                   ep['name'].toString().split('.').first,
@@ -389,42 +431,48 @@ class _TvShowDetailWidgetState extends State<TvShowDetailWidget> {
   }
 
   void _playEpisode(Map<String, dynamic> ep, int index, List<Map<String, dynamic>> allEpisodes) async {
-    Map<String, dynamic>? nextEp = (index < allEpisodes.length - 1) ? allEpisodes[index + 1] : null;
-    List<String> subtitleUrls = [];
-    try {
-      final String videoPath = ep['path'];
-      final subUri = Uri.parse('http://${widget.serverIp}:${widget.serverPort}/api/find-subtitles')
-          .replace(queryParameters: {'path': videoPath});
-      final response = await http.get(subUri, headers: {'Authorization': widget.authHeader});
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        if (data['success'] == true) {
-          subtitleUrls = (data['subtitles'] as List).map((sub) {
-            return 'http://${widget.serverIp}:${widget.serverPort}/api/subtitle?path=${Uri.encodeComponent(sub['path'])}';
-          }).toList();
-        }
+  Map<String, dynamic>? nextEp = (index < allEpisodes.length - 1) ? allEpisodes[index + 1] : null;
+  List<String> subtitleUrls = [];
+  try {
+    final String videoPath = ep['path'];
+    final subUri = Uri.parse('http://${widget.serverIp}:${widget.serverPort}/api/find-subtitles')
+        .replace(queryParameters: {'path': videoPath});
+    final response = await http.get(subUri, headers: {'Authorization': widget.authHeader});
+    if (response.statusCode == 200) {
+      final data = json.decode(response.body);
+      if (data['success'] == true) {
+        subtitleUrls = (data['subtitles'] as List).map((sub) {
+          return 'http://${widget.serverIp}:${widget.serverPort}/api/subtitle?path=${Uri.encodeComponent(sub['path'])}';
+        }).toList();
       }
-    } catch (e) {}
+    }
+  } catch (e) {}
 
-    if (!mounted) return;
+  if (!mounted) return;
 
-    final result = await Navigator.push(context, MaterialPageRoute(builder: (c) => VideoPlayerScreen(
-      videoUrl: 'http://${widget.serverIp}:${widget.serverPort}/api/stream?path=${Uri.encodeComponent(ep['path'])}',
-      subtitleUrls: subtitleUrls,
-      title: ep['name'],
-      serverIp: widget.serverIp,
-      serverPort: widget.serverPort,
-      username: widget.username,
-      password: widget.password,
-      fileSize: ep['size'] ?? 0,
-      nextEpisode: nextEp,
-    )));
+  final result = await Navigator.push(context, MaterialPageRoute(builder: (c) => VideoPlayerScreen(
+    videoUrl: 'http://${widget.serverIp}:${widget.serverPort}/api/stream?path=${Uri.encodeComponent(ep['path'])}',
+    subtitleUrls: subtitleUrls,
+    title: ep['name'],
+    serverIp: widget.serverIp,
+    serverPort: widget.serverPort,
+    username: widget.username,
+    password: widget.password,
+    fileSize: ep['size'] ?? 0,
+    nextEpisode: nextEp,
+  )));
 
-    if (mounted) setState(() {});
-
-    if (result is Map && result['action'] == 'playNext' && index < allEpisodes.length - 1) {
-      final int nextIndex = index + 1;
-      _playEpisode(allEpisodes[nextIndex], nextIndex, allEpisodes);
+  if (result is Map && result['action'] == 'playNext' && index < allEpisodes.length - 1) {
+    final int nextIndex = index + 1;
+    await SystemChrome.setPreferredOrientations([
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
+    _playEpisode(allEpisodes[nextIndex], nextIndex, allEpisodes);
+  } else {
+    if (mounted) {
+      setState(() {});
     }
   }
+}
 }

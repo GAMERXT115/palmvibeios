@@ -12,6 +12,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'video_progress_manager.dart';
 import 'accessibility.dart';
+import 'picture_in_picture.dart';
 
 class SubtitleEntry {
   final int index;
@@ -50,8 +51,6 @@ class VideoPlayerScreen extends StatefulWidget {
 }
 
 class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProviderStateMixin {
-  late final Player player = Player();
-  late final VideoController controller = VideoController(player);
   final FocusNode _rootFocusNode = FocusNode();
   
   late AnimationController _controlsAnimationController;
@@ -106,10 +105,20 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
   bool _isHoveringX = false;
   bool _isCasting = false;
 
-  @override
+    @override
   void initState() {
     super.initState();
     MediaKit.ensureInitialized();
+    GlobalVideoManager().initPlayer(
+      url: widget.videoUrl,
+      title: widget.title,
+      subs: widget.subtitleUrls,
+      ip: widget.serverIp,
+      port: widget.serverPort,
+      user: widget.username,
+      pass: widget.password,
+    );
+
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     SystemChrome.setPreferredOrientations([
       DeviceOrientation.landscapeLeft,
@@ -126,6 +135,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
     _startCastHeartbeat();
   }
 
+
   void _startCastHeartbeat() {
     _castHeartbeatTimer = Timer.periodic(const Duration(seconds: 2), (timer) {
       _sendHeartbeat();
@@ -133,7 +143,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
   }
 
   Future<void> _sendHeartbeat() async {
-    if (!player.state.playing || _isCasting) return;
+    final player = GlobalVideoManager().player;
+    if (player == null || !player.state.playing || _isCasting) return;
     final String auth = 'Basic ${base64Encode(utf8.encode('${widget.username}:${widget.password}'))}';
     final int position = player.state.position.inSeconds;
     try {
@@ -149,26 +160,24 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
     final prefs = await SharedPreferences.getInstance();
     setState(() {
       _isGlassSubtitle = prefs.getBool('isGlassSubtitle') ?? true;
-      _playbackSpeed = prefs.getDouble('playbackSpeed') ?? 1.0;
       _subtitleFontSize = prefs.getDouble('subtitleFontSize') ?? 20.0;
-      _subtitleDelaySeconds = prefs.getDouble('subtitleDelaySeconds') ?? 0.0;
       _subtitleHeight = prefs.getDouble('subtitleHeight') ?? 60.0;
       _subtitleColor = Color(prefs.getInt('subtitleColor') ?? Colors.white.value);
       _autoSkipIntro = prefs.getBool('autoSkipIntro') ?? false;
-      _audioBoostFactor = prefs.getDouble('audioBoostFactor') ?? 1.0;
+      _playbackSpeed = 1.0;
+      _subtitleDelaySeconds = 0.0;
+      _audioBoostFactor = 1.0;
+      _scale = 1.0;
     });
   }
 
   Future<void> _saveSettings() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('isGlassSubtitle', _isGlassSubtitle);
-    await prefs.setDouble('playbackSpeed', _playbackSpeed);
     await prefs.setDouble('subtitleFontSize', _subtitleFontSize);
-    await prefs.setDouble('subtitleDelaySeconds', _subtitleDelaySeconds);
     await prefs.setDouble('subtitleHeight', _subtitleHeight);
     await prefs.setInt('subtitleColor', _subtitleColor.value);
     await prefs.setBool('autoSkipIntro', _autoSkipIntro);
-    await prefs.setDouble('audioBoostFactor', _audioBoostFactor);
   }
 
   Future<void> _fetchMetadata() async {
@@ -205,10 +214,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
   }
 
   Future<void> _initializePlayer() async {
+    final player = GlobalVideoManager().player;
+    if (player == null) return;
+
     setState(() {
       _isLoading = true;
       _isBuffering = true;
     });
+
     try {
       final String rawAuth = base64Encode(utf8.encode('${widget.username}:${widget.password}'));
       final String authenticatedUrl = widget.videoUrl.contains('?') ? '${widget.videoUrl}&auth=$rawAuth' : '${widget.videoUrl}?auth=$rawAuth';
@@ -216,11 +229,11 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
       _fetchMetadata();
 
       player.stream.buffering.listen((event) {
-        setState(() => _isBuffering = event);
+        if (mounted) setState(() => _isBuffering = event);
       });
 
       player.stream.position.listen((pos) {
-        _videoListener(pos);
+        if (mounted) _videoListener(pos);
       });
 
       player.stream.playing.listen((playing) {
@@ -230,15 +243,22 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
       });
 
       player.stream.completed.listen((completed) {
-        if (completed && widget.nextEpisode != null) {
+        if (completed && widget.nextEpisode != null && mounted) {
           _playNextEpisode();
         }
       });
 
-      await player.open(Media(authenticatedUrl, httpHeaders: {
-        'Authorization': 'Basic $rawAuth',
-        'User-Agent': 'Mozilla/5.0',
-      }));
+      if (player.state.playlist.medias.isNotEmpty) {
+        setState(() {
+          _isLoading = false;
+          _isBuffering = false;
+        });
+      } else {
+        await player.open(Media(authenticatedUrl, httpHeaders: {
+          'Authorization': 'Basic $rawAuth',
+          'User-Agent': 'Mozilla/5.0',
+        }));
+      }
 
       await player.setSubtitleTrack(SubtitleTrack.no());
       await player.setRate(_playbackSpeed);
@@ -252,11 +272,13 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
         authHeader: 'Basic $rawAuth',
       );
 
-      if (progress != null && progress.position > 5000) {
+      if (progress != null && progress.position > 5000 && mounted && !GlobalVideoManager().isReturningFromPiP) {
         _showResumeDialog(progress);
       }
+      
+      GlobalVideoManager().isReturningFromPiP = false;
 
-      if (widget.subtitleUrls.isNotEmpty) _selectSubtitle(widget.subtitleUrls[0]);
+      if (widget.subtitleUrls.isNotEmpty && mounted) _selectSubtitle(widget.subtitleUrls[0]);
 
       setState(() {
         _isLoading = false;
@@ -296,7 +318,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
         if (_isAutoSkipping && currentSec > end) setState(() => _isAutoSkipping = false);
       }
     }
-    final duration = player.state.duration;
+    final player = GlobalVideoManager().player;
+    final duration = player?.state.duration ?? Duration.zero;
     if (widget.nextEpisode != null && !_nextEpisodeCancelled && duration.inSeconds > 0 && (duration.inSeconds - position.inSeconds) <= 20 && !_showNextEpisodeOverlay) {
       _triggerNextEpisodeOverlay();
     }
@@ -312,7 +335,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
   }
 
   Future<void> _skipIntro() async {
-    if (_currentIntro != null && !_isAutoSkipping) {
+    final player = GlobalVideoManager().player;
+    if (_currentIntro != null && !_isAutoSkipping && player != null) {
       setState(() {
         _isAutoSkipping = true;
         _showSkipIntro = false;
@@ -325,6 +349,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
   }
 
   void _togglePlay() {
+    final player = GlobalVideoManager().player;
+    if (player == null) return;
     if (player.state.playing) {
       player.pause();
     } else {
@@ -355,7 +381,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
           actions: [
             TextButton(onPressed: () => Navigator.pop(context), child: const Text("START OVER")),
             ElevatedButton(
-              onPressed: () { player.seek(Duration(milliseconds: progress.position)); Navigator.pop(context); },
+              onPressed: () { GlobalVideoManager().player?.seek(Duration(milliseconds: progress.position)); Navigator.pop(context); },
               child: const Text("RESUME"),
             ),
           ],
@@ -365,6 +391,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
   }
 
   Future<void> _seekToRelative(Duration relativeOffset) async {
+    final player = GlobalVideoManager().player;
+    if (player == null) return;
     final int currentMs = player.state.position.inMilliseconds;
     final int totalDurationMs = player.state.duration.inMilliseconds;
     final int clampedPosMs = (currentMs + relativeOffset.inMilliseconds).clamp(0, totalDurationMs);
@@ -374,6 +402,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
   }
 
   void _saveProgress() {
+    final player = GlobalVideoManager().player;
+    if (player == null) return;
     final auth = 'Basic ${base64Encode(utf8.encode('${widget.username}:${widget.password}'))}';
     VideoProgressManager.saveProgress(
       videoPath: _getRelativeVideoPath(),
@@ -437,7 +467,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
   void _startHideTimer() {
     _hideControlsTimer?.cancel();
     _hideControlsTimer = Timer(const Duration(seconds: 3), () {
-      if (mounted && player.state.playing && !_isDragging) {
+      final player = GlobalVideoManager().player;
+      if (mounted && player != null && player.state.playing && !_isDragging) {
         _hideControls();
       }
     });
@@ -448,11 +479,18 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
   }
 
   void _triggerNextEpisodeOverlay() {
-    setState(() => _showNextEpisodeOverlay = true);
-    _capsuleSlideController.forward();
-    _progressController.forward();
-    _nextEpisodeTimer = Timer(const Duration(seconds: 5), () { if (mounted && _showNextEpisodeOverlay) _playNextEpisode(); });
-  }
+  if (_showNextEpisodeOverlay || _nextEpisodeCancelled) return;
+  setState(() => _showNextEpisodeOverlay = true);
+  _capsuleSlideController.forward();
+  _progressController.reset();
+  _progressController.forward();
+  _nextEpisodeTimer?.cancel();
+  _nextEpisodeTimer = Timer(const Duration(seconds: 5), () {
+    if (mounted && _showNextEpisodeOverlay) {
+      _playNextEpisode();
+    }
+  });
+}
 
   void _playNextEpisode() {
     if (widget.nextEpisode != null) {
@@ -463,12 +501,15 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
   }
 
   void _cancelNextEpisode() {
-    _nextEpisodeTimer?.cancel();
-    _capsuleSlideController.reverse();
-    _progressController.stop();
-    _progressController.reset();
-    setState(() { _showNextEpisodeOverlay = false; _nextEpisodeCancelled = true; });
-  }
+  _nextEpisodeTimer?.cancel();
+  _capsuleSlideController.reverse();
+  _progressController.stop();
+  _progressController.reset();
+  setState(() {
+    _showNextEpisodeOverlay = false;
+    _nextEpisodeCancelled = true;
+  });
+}
 
   Future<void> _showCastDialog() async {
     showDialog(
@@ -533,6 +574,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
   }
 
   Future<void> _triggerCast(String targetDevice) async {
+    final player = GlobalVideoManager().player;
+    if (player == null) return;
     final String videoPath = _getRelativeVideoPath();
     final String auth = 'Basic ${base64Encode(utf8.encode('${widget.username}:${widget.password}'))}';
     final int timestamp = player.state.position.inSeconds;
@@ -580,13 +623,15 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
         final data = json.decode(response.body);
         if (data['success'] == true && data['timestamp'] != null) {
           final int remotePos = data['timestamp'];
-          player.seek(Duration(seconds: remotePos));
+          GlobalVideoManager().player?.seek(Duration(seconds: remotePos));
         }
       } catch (e) {}
     });
   }
 
   Future<void> _stopCast() async {
+    final player = GlobalVideoManager().player;
+    if (player == null) return;
     final auth = 'Basic ${base64Encode(utf8.encode('${widget.username}:${widget.password}'))}';
     try {
       final statusRes = await http.get(
@@ -631,7 +676,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
         onPlaybackSpeedChanged: (speed) { 
           setState(() { 
             _playbackSpeed = double.parse(speed.toStringAsFixed(1));
-            player.setRate(_playbackSpeed); 
+            GlobalVideoManager().player?.setRate(_playbackSpeed); 
           }); 
           _indicatorIcon = Icons.speed;
           _indicatorText = "${_playbackSpeed.toStringAsFixed(1)}x";
@@ -641,7 +686,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
         onGlassSubtitleChanged: (val) { setState(() => _isGlassSubtitle = val); _saveSettings(); },
         onAudioBoostChanged: (boost) { 
           _audioBoostFactor = boost;
-          player.setVolume(_audioBoostFactor * 100.0);
+          GlobalVideoManager().player?.setVolume(_audioBoostFactor * 100.0);
           _indicatorIcon = Icons.bolt;
           _indicatorText = "${(_audioBoostFactor * 100).round()}%";
           _showIndicatorUI();
@@ -660,6 +705,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
         onSubtitleColorChanged: (color) { setState(() => _subtitleColor = color); _saveSettings(); },
         onAutoSkipIntroChanged: (val) { setState(() => _autoSkipIntro = val); _saveSettings(); },
         onSetIntroTiming: (type) async {
+          final player = GlobalVideoManager().player;
+          if (player == null) return;
           final String videoPath = _getRelativeVideoPath();
           final String auth = 'Basic ${base64Encode(utf8.encode('${widget.username}:${widget.password}'))}';
           final double currentTime = player.state.position.inSeconds.toDouble();
@@ -740,117 +787,130 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
 
   @override
   Widget build(BuildContext context) {
-    return KeyboardListener(
-      focusNode: _rootFocusNode,
-      autofocus: true,
-      onKeyEvent: (event) {
-        if (event is KeyDownEvent) {
-          if (event.logicalKey == LogicalKeyboardKey.space) _togglePlay();
-          if (event.logicalKey == LogicalKeyboardKey.arrowLeft) _seekToRelative(const Duration(seconds: -10));
-          if (event.logicalKey == LogicalKeyboardKey.arrowRight) _seekToRelative(const Duration(seconds: 10));
-        }
+    final player = GlobalVideoManager().player;
+    final controller = GlobalVideoManager().controller;
+
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) async {
+        if (didPop) return;
+        GlobalVideoManager().showPiP(context);
+        Navigator.of(context).pop();
       },
-      child: Scaffold(
-        backgroundColor: Colors.black,
-        body: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: () {
-            if (_controlsVisible) {
-              _hideControls();
-            } else {
-              _showControls();
-            }
-          },
-          onDoubleTapDown: (details) {
-            final screenWidth = MediaQuery.of(context).size.width;
-            if (details.globalPosition.dx < screenWidth / 2) {
-              _seekToRelative(const Duration(seconds: -10));
-              _showActionIndicator(true);
-            } else {
-              _seekToRelative(const Duration(seconds: 10));
-              _showActionIndicator(false);
-            }
-          },
-          child: Stack(
-            children: [
-              Center(
-                child: Transform.scale(
-                  scale: _scale, 
-                  child: Video(
-                    controller: controller,
-                    controls: NoVideoControls,
-                  )
-                ),
-              ),
-              if (_isCasting) _buildCastOverlay(),
-              if (_showRewindIndicator || _showForwardIndicator)
-                Center(
-                  child: Container(
-                    padding: const EdgeInsets.all(20),
-                    decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(50)),
-                    child: Icon(_showRewindIndicator ? Icons.replay_10 : Icons.forward_10, color: Colors.white, size: 60),
+      child: KeyboardListener(
+        focusNode: _rootFocusNode,
+        autofocus: true,
+        onKeyEvent: (event) {
+          if (event is KeyDownEvent) {
+            if (event.logicalKey == LogicalKeyboardKey.space) _togglePlay();
+            if (event.logicalKey == LogicalKeyboardKey.arrowLeft) _seekToRelative(const Duration(seconds: -10));
+            if (event.logicalKey == LogicalKeyboardKey.arrowRight) _seekToRelative(const Duration(seconds: 10));
+          }
+        },
+        child: Scaffold(
+          backgroundColor: Colors.black,
+          body: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () {
+              if (_controlsVisible) {
+                _hideControls();
+              } else {
+                _showControls();
+              }
+            },
+            onDoubleTapDown: (details) {
+              final screenWidth = MediaQuery.of(context).size.width;
+              if (details.globalPosition.dx < screenWidth / 2) {
+                _seekToRelative(const Duration(seconds: -10));
+                _showActionIndicator(true);
+              } else {
+                _seekToRelative(const Duration(seconds: 10));
+                _showActionIndicator(false);
+              }
+            },
+            child: Stack(
+              children: [
+                if (controller != null)
+                  Center(
+                    child: Transform.scale(
+                      scale: _scale, 
+                      child: Video(
+                        controller: controller,
+                        controls: NoVideoControls,
+                      )
+                    ),
                   ),
-                ),
-              StreamBuilder<Duration>(
-                stream: player.stream.position,
-                builder: (context, snapshot) {
-                  if (_subtitles.isEmpty || _isCasting) return const SizedBox.shrink();
-                  final currentMs = player.state.position.inMilliseconds;
-                  final delayMs = (_subtitleDelaySeconds * 1000).toInt();
-                  final adjustedPos = Duration(milliseconds: currentMs - delayMs);
-                  String text = '';
-                  for (final entry in _subtitles) {
-                    if (adjustedPos >= entry.start && adjustedPos <= entry.end) {
-                      text = entry.text;
-                      break;
-                    }
-                  }
-                  if (text.isEmpty) return const SizedBox.shrink();
-                  return Positioned(
-                    bottom: _subtitleHeight, left: 20, right: 20,
-                    child: IgnorePointer(
-                      child: Center(
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(12),
-                          child: BackdropFilter(
-                            filter: ImageFilter.blur(sigmaX: _isGlassSubtitle ? 15 : 0, sigmaY: _isGlassSubtitle ? 15 : 0),
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                              decoration: BoxDecoration(
-                                color: _isGlassSubtitle ? _subtitleColor.withOpacity(0.15) : _subtitleColor.withOpacity(0.8),
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: Text(
-                                text, 
-                                style: TextStyle(color: Colors.white, fontSize: _subtitleFontSize, fontWeight: FontWeight.bold, height: 1.2), 
-                                textAlign: TextAlign.center
+                if (_isCasting) _buildCastOverlay(),
+                if (_showRewindIndicator || _showForwardIndicator)
+                  Center(
+                    child: Container(
+                      padding: const EdgeInsets.all(20),
+                      decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(50)),
+                      child: Icon(_showRewindIndicator ? Icons.replay_10 : Icons.forward_10, color: Colors.white, size: 60),
+                    ),
+                  ),
+                if (player != null)
+                  StreamBuilder<Duration>(
+                    stream: player.stream.position,
+                    builder: (context, snapshot) {
+                      if (_subtitles.isEmpty || _isCasting) return const SizedBox.shrink();
+                      final currentMs = player.state.position.inMilliseconds;
+                      final delayMs = (_subtitleDelaySeconds * 1000).toInt();
+                      final adjustedPos = Duration(milliseconds: currentMs - delayMs);
+                      String text = '';
+                      for (final entry in _subtitles) {
+                        if (adjustedPos >= entry.start && adjustedPos <= entry.end) {
+                          text = entry.text;
+                          break;
+                        }
+                      }
+                      if (text.isEmpty) return const SizedBox.shrink();
+                      return Positioned(
+                        bottom: _subtitleHeight, left: 20, right: 20,
+                        child: IgnorePointer(
+                          child: Center(
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(12),
+                              child: BackdropFilter(
+                                filter: ImageFilter.blur(sigmaX: _isGlassSubtitle ? 15 : 0, sigmaY: _isGlassSubtitle ? 15 : 0),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                                  decoration: BoxDecoration(
+                                    color: _isGlassSubtitle ? _subtitleColor.withOpacity(0.15) : _subtitleColor.withOpacity(0.8),
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  child: Text(
+                                    text, 
+                                    style: TextStyle(color: Colors.white, fontSize: _subtitleFontSize, fontWeight: FontWeight.bold, height: 1.2), 
+                                    textAlign: TextAlign.center
+                                  ),
+                                ),
                               ),
                             ),
                           ),
                         ),
-                      ),
-                    ),
-                  );
-                },
-              ),
-              if (_showSkipIntro && !_isCasting) _buildSkipIntroButton(),
-              if (_isIndicatorVisible)
-                Positioned(
-                  top: 40, right: 20,
-                  child: Container(
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(8)),
-                    child: Row(mainAxisSize: MainAxisSize.min, children: [
-                      Icon(_indicatorIcon, color: Colors.white, size: 18),
-                      const SizedBox(width: 8),
-                      Text(_indicatorText, style: const TextStyle(color: Colors.white, fontSize: 14)),
-                    ]),
+                      );
+                    },
                   ),
-                ),
-              if (_showNextEpisodeOverlay && widget.nextEpisode != null && !_isCasting) _buildNextEpisodeCapsule(),
-              if (_controlsVisible && !_isCasting) _buildMainControls(),
-              if ((_isBuffering || _isLoading) && !_isCasting) const Center(child: CircularProgressIndicator(color: Colors.purpleAccent)),
-            ],
+                if (_showSkipIntro && !_isCasting) _buildSkipIntroButton(),
+                if (_isIndicatorVisible)
+                  Positioned(
+                    top: 40, right: 20,
+                    child: Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(8)),
+                      child: Row(mainAxisSize: MainAxisSize.min, children: [
+                        Icon(_indicatorIcon, color: Colors.white, size: 18),
+                        const SizedBox(width: 8),
+                        Text(_indicatorText, style: const TextStyle(color: Colors.white, fontSize: 14)),
+                      ]),
+                    ),
+                  ),
+                if (_showNextEpisodeOverlay && widget.nextEpisode != null && !_isCasting) _buildNextEpisodeCapsule(),
+                if (_controlsVisible && !_isCasting) _buildMainControls(),
+                if ((_isBuffering || _isLoading) && !_isCasting) const Center(child: CircularProgressIndicator(color: Colors.purpleAccent)),
+              ],
+            ),
           ),
         ),
       ),
@@ -891,26 +951,107 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
   }
 
   Widget _buildNextEpisodeCapsule() {
-    return SlideTransition(
-      position: _capsuleSlideAnimation,
-      child: Align(
-        alignment: Alignment.topCenter,
-        child: Padding(
-          padding: const EdgeInsets.only(top: 20),
-          child: Container(
-            width: 300, height: 60,
-            decoration: BoxDecoration(color: Colors.black.withOpacity(0.8), borderRadius: BorderRadius.circular(30)),
-            child: Row(children: [
-              const SizedBox(width: 20),
-              Expanded(child: Text('UP NEXT: ${path.basenameWithoutExtension(widget.nextEpisode!['name'])}', overflow: TextOverflow.ellipsis)),
-              IconButton(icon: const Icon(Icons.close), onPressed: _cancelNextEpisode),
-              const SizedBox(width: 10),
-            ]),
+  return SlideTransition(
+    position: _capsuleSlideAnimation,
+    child: Align(
+      alignment: Alignment.topCenter,
+      child: Padding(
+        padding: const EdgeInsets.only(top: 20),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(100),
+          child: BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+            child: Container(
+              width: 450,
+              height: 70,
+              decoration: BoxDecoration(
+                color: Colors.black.withOpacity(0.8),
+                borderRadius: BorderRadius.circular(100),
+                border: Border.all(color: _purpleGlow.withOpacity(0.5), width: 1.5),
+              ),
+              child: Stack(
+                children: [
+                  Positioned.fill(
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: AnimatedBuilder(
+                        animation: _progressController,
+                        builder: (context, child) => FractionallySizedBox(
+                          widthFactor: _progressController.value,
+                          child: Container(
+                            decoration: BoxDecoration(
+                              color: _purpleGlow.withOpacity(0.2),
+                              borderRadius: BorderRadius.circular(100),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 25),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'UP NEXT',
+                                style: TextStyle(
+                                  color: _purpleGlow,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w900,
+                                  letterSpacing: 1.2,
+                                ),
+                              ),
+                              Text(
+                                path.basenameWithoutExtension(widget.nextEpisode!['name']),
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 15),
+                        ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: _purpleGlow,
+                            foregroundColor: Colors.white,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(20),
+                            ),
+                            padding: const EdgeInsets.symmetric(horizontal: 20),
+                          ),
+                          onPressed: _playNextEpisode,
+                          child: const Text(
+                            'PLAY NOW',
+                            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        IconButton(
+                          icon: const Icon(Icons.close, color: Colors.white70, size: 22),
+                          onPressed: _cancelNextEpisode,
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
         ),
       ),
-    );
-  }
+    ),
+  );
+}
 
   Widget _buildSkipIntroButton() {
     return Positioned(
@@ -927,6 +1068,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
   }
 
   Widget _buildMainControls() {
+    final player = GlobalVideoManager().player;
     return FadeTransition(
       opacity: _controlsOpacity,
       child: Container(
@@ -937,7 +1079,13 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
               child: Row(
                 children: [
-                  IconButton(icon: const Icon(Icons.arrow_back, color: Colors.white), onPressed: () => Navigator.pop(context)),
+                  IconButton(
+                    icon: const Icon(Icons.arrow_back, color: Colors.white), 
+                    onPressed: () {
+                      GlobalVideoManager().showPiP(context);
+                      Navigator.pop(context);
+                    }
+                  ),
                   const SizedBox(width: 10),
                   Expanded(child: Text(path.basenameWithoutExtension(widget.title), style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold), overflow: TextOverflow.ellipsis)),
                   IconButton(icon: const Icon(Icons.cast, color: Colors.white), onPressed: _showCastDialog),
@@ -951,7 +1099,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
               IconButton(icon: const Icon(Icons.replay_10, size: 40, color: Colors.white), onPressed: () => _seekToRelative(const Duration(seconds: -10))),
               const SizedBox(width: 40),
               IconButton(
-                icon: Icon(player.state.playing ? Icons.pause_circle_filled : Icons.play_circle_filled, size: 80, color: Colors.purpleAccent), 
+                icon: Icon((player?.state.playing ?? false) ? Icons.pause_circle_filled : Icons.play_circle_filled, size: 80, color: Colors.purpleAccent), 
                 onPressed: _togglePlay
               ),
               const SizedBox(width: 40),
@@ -977,6 +1125,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
   }
 
     Widget _buildProgressBar() {
+    final player = GlobalVideoManager().player;
+    if (player == null) return const SizedBox.shrink();
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 0, 20, 0),
       child: StreamBuilder<Duration>(
@@ -1149,7 +1299,6 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> with TickerProvid
     _actionIndicatorTimer?.cancel();
     _castHeartbeatTimer?.cancel();
     _castStatusTimer?.cancel();
-    player.dispose();
     _controlsAnimationController.dispose();
     _capsuleSlideController.dispose();
     _progressController.dispose();

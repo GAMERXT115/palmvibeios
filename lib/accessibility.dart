@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -63,6 +64,9 @@ class _AccessibilityDialogState extends State<AccessibilityDialog> {
   late Color _currentColor;
   late bool _currentAutoSkip;
 
+  Timer? _repeatTimer;
+  Timer? _delayTimer;
+
   final Map<String, Color> _colorOptions = {
     'White': Colors.white,
     'Yellow': Colors.yellow,
@@ -91,14 +95,43 @@ class _AccessibilityDialogState extends State<AccessibilityDialog> {
     );
   }
 
-  Widget _buildFocusableIconButton({
+  void _handleAction(VoidCallback action) {
+    action();
+    _delayTimer?.cancel();
+    _repeatTimer?.cancel();
+    _delayTimer = Timer(const Duration(seconds: 3), () {
+      _repeatTimer = Timer.periodic(const Duration(milliseconds: 100), (t) => action());
+    });
+  }
+
+  void _stopAction() {
+    _delayTimer?.cancel();
+    _repeatTimer?.cancel();
+  }
+
+  Widget _buildRepeatingButton({
     required IconData icon,
-    required VoidCallback onPressed,
+    required VoidCallback action,
   }) {
-    return IconButton(
-      icon: Icon(icon, color: Colors.white),
-      focusColor: Colors.purple.withOpacity(0.6),
-      onPressed: onPressed,
+    return GestureDetector(
+      onTapDown: (_) => _handleAction(action),
+      onTapUp: (_) => _stopAction(),
+      onTapCancel: () => _stopAction(),
+      child: Focus(
+        child: Builder(builder: (context) {
+          final bool hasFocus = Focus.of(context).hasFocus;
+          return Container(
+            decoration: BoxDecoration(
+              color: hasFocus ? Colors.purple.withOpacity(0.6) : Colors.transparent,
+              shape: BoxShape.circle,
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(8.0),
+              child: Icon(icon, color: Colors.white),
+            ),
+          );
+        }),
+      ),
     );
   }
 
@@ -109,10 +142,6 @@ class _AccessibilityDialogState extends State<AccessibilityDialog> {
   }) {
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 4),
-      decoration: BoxDecoration(
-        color: Colors.transparent,
-        borderRadius: BorderRadius.circular(12),
-      ),
       child: ListTile(
         title: Text(title, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
         subtitle: subtitle != null ? Text(subtitle, style: const TextStyle(color: Colors.white70)) : null,
@@ -154,17 +183,17 @@ class _AccessibilityDialogState extends State<AccessibilityDialog> {
                                   trailing: Row(
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
-                                      _buildFocusableIconButton(
+                                      _buildRepeatingButton(
                                         icon: Icons.remove_circle,
-                                        onPressed: () {
+                                        action: () {
                                           setState(() => _currentSpeed = double.parse((_currentSpeed - 0.1).toStringAsFixed(1)).clamp(0.1, 5.0));
                                           widget.onPlaybackSpeedChanged(_currentSpeed);
                                         },
                                       ),
                                       Text('${_currentSpeed.toStringAsFixed(1)}x', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                                      _buildFocusableIconButton(
+                                      _buildRepeatingButton(
                                         icon: Icons.add_circle,
-                                        onPressed: () {
+                                        action: () {
                                           setState(() => _currentSpeed = double.parse((_currentSpeed + 0.1).toStringAsFixed(1)).clamp(0.1, 5.0));
                                           widget.onPlaybackSpeedChanged(_currentSpeed);
                                         },
@@ -177,17 +206,17 @@ class _AccessibilityDialogState extends State<AccessibilityDialog> {
                                   trailing: Row(
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
-                                      _buildFocusableIconButton(
+                                      _buildRepeatingButton(
                                         icon: Icons.remove_circle,
-                                        onPressed: () {
+                                        action: () {
                                           setState(() => _currentBoost = double.parse((_currentBoost - 0.1).toStringAsFixed(1)).clamp(1.0, 20.0));
                                           widget.onAudioBoostChanged(_currentBoost);
                                         },
                                       ),
                                       Text('${(_currentBoost * 100).round()}%', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                                      _buildFocusableIconButton(
+                                      _buildRepeatingButton(
                                         icon: Icons.add_circle,
-                                        onPressed: () {
+                                        action: () {
                                           setState(() => _currentBoost = double.parse((_currentBoost + 0.1).toStringAsFixed(1)).clamp(1.0, 20.0));
                                           widget.onAudioBoostChanged(_currentBoost);
                                         },
@@ -198,8 +227,8 @@ class _AccessibilityDialogState extends State<AccessibilityDialog> {
                                 _buildTile(
                                   title: 'Zoom Level',
                                   subtitle: _currentScale == 1.0 ? "Original" : "${(_currentScale * 100).toInt()}%",
-                                  trailing: _buildFocusableIconButton(
-                                    icon: Icons.zoom_in,
+                                  trailing: IconButton(
+                                    icon: const Icon(Icons.zoom_in, color: Colors.white),
                                     onPressed: () {
                                       setState(() => _currentScale = _currentScale == 1.0 ? 1.25 : (_currentScale == 1.25 ? 1.5 : 1.0));
                                       widget.onScaleChanged(_currentScale);
@@ -210,39 +239,43 @@ class _AccessibilityDialogState extends State<AccessibilityDialog> {
                                 Row(
                                   children: [
                                     Expanded(
-                                      child: Focus(
-                                        child: Builder(builder: (context) {
-                                          final bool hasFocus = Focus.of(context).hasFocus;
-                                          return ElevatedButton(
-                                            style: ElevatedButton.styleFrom(
-                                              backgroundColor: hasFocus ? Colors.purpleAccent : Colors.white10,
-                                              padding: const EdgeInsets.symmetric(vertical: 20),
-                                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                                            ),
-                                            onPressed: () => widget.onSetIntroTiming('start'),
-                                            child: const Text("INTRO\nSTART", textAlign: TextAlign.center, style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900, height: 1.2)),
-                                          );
-                                        }),
+                                      child: ElevatedButton(
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor: Colors.white10,
+                                          padding: const EdgeInsets.symmetric(vertical: 20),
+                                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                        ),
+                                        onPressed: () => widget.onSetIntroTiming('start'),
+                                        child: const Text("INTRO\nSTART", textAlign: TextAlign.center, style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900, height: 1.2)),
                                       ),
                                     ),
                                     const SizedBox(width: 15),
                                     Expanded(
-                                      child: Focus(
-                                        child: Builder(builder: (context) {
-                                          final bool hasFocus = Focus.of(context).hasFocus;
-                                          return ElevatedButton(
-                                            style: ElevatedButton.styleFrom(
-                                              backgroundColor: hasFocus ? Colors.purpleAccent : Colors.white10,
-                                              padding: const EdgeInsets.symmetric(vertical: 20),
-                                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                                            ),
-                                            onPressed: () => widget.onSetIntroTiming('end'),
-                                            child: const Text("INTRO\nEND", textAlign: TextAlign.center, style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900, height: 1.2)),
-                                          );
-                                        }),
+                                      child: ElevatedButton(
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor: Colors.white10,
+                                          padding: const EdgeInsets.symmetric(vertical: 20),
+                                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                        ),
+                                        onPressed: () => widget.onSetIntroTiming('end'),
+                                        child: const Text("INTRO\nEND", textAlign: TextAlign.center, style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900, height: 1.2)),
                                       ),
                                     ),
                                   ],
+                                ),
+                                const SizedBox(height: 15),
+                                ElevatedButton.icon(
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: Colors.redAccent.withOpacity(0.2),
+                                    minimumSize: const Size(double.infinity, 60),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(12),
+                                      side: const BorderSide(color: Colors.redAccent, width: 1),
+                                    ),
+                                  ),
+                                  onPressed: widget.onReportIssue,
+                                  icon: const Icon(Icons.report_problem, color: Colors.white),
+                                  label: const Text("REPORT AN ISSUE", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, letterSpacing: 1.5)),
                                 ),
                               ],
                             ),
@@ -256,7 +289,6 @@ class _AccessibilityDialogState extends State<AccessibilityDialog> {
                                   trailing: Switch(
                                     value: _currentGlass,
                                     activeColor: Colors.purpleAccent,
-                                    focusColor: Colors.purple.withOpacity(0.6),
                                     onChanged: (val) {
                                       setState(() => _currentGlass = val);
                                       widget.onGlassSubtitleChanged(val);
@@ -268,7 +300,6 @@ class _AccessibilityDialogState extends State<AccessibilityDialog> {
                                   trailing: Switch(
                                     value: _currentAutoSkip,
                                     activeColor: Colors.purpleAccent,
-                                    focusColor: Colors.purple.withOpacity(0.6),
                                     onChanged: (val) {
                                       setState(() => _currentAutoSkip = val);
                                       widget.onAutoSkipIntroChanged(val);
@@ -282,14 +313,13 @@ class _AccessibilityDialogState extends State<AccessibilityDialog> {
                                     child: DropdownButton<Color>(
                                       value: _currentColor,
                                       underline: const SizedBox(),
-                                      focusColor: Colors.purple.withOpacity(0.6),
                                       icon: const Icon(Icons.color_lens, color: Colors.white),
                                       items: _colorOptions.entries.map((entry) {
                                         return DropdownMenuItem<Color>(
                                           value: entry.value,
                                           child: Row(
                                             children: [
-                                              Container(width: 20, height: 20, decoration: BoxDecoration(color: entry.value, shape: BoxShape.circle, border: Border.all(color: Colors.white24))),
+                                              Container(width: 20, height: 20, decoration: BoxDecoration(color: entry.value, shape: BoxShape.circle)),
                                               const SizedBox(width: 10),
                                               Text(entry.key, style: const TextStyle(color: Colors.white)),
                                             ],
@@ -310,17 +340,17 @@ class _AccessibilityDialogState extends State<AccessibilityDialog> {
                                   trailing: Row(
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
-                                      _buildFocusableIconButton(
+                                      _buildRepeatingButton(
                                         icon: Icons.remove_circle,
-                                        onPressed: () {
+                                        action: () {
                                           setState(() => _currentSize = (_currentSize - 2).clamp(10, 100));
                                           widget.onSubtitleFontSizeChanged(_currentSize);
                                         },
                                       ),
                                       Text('${_currentSize.toInt()}', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                                      _buildFocusableIconButton(
+                                      _buildRepeatingButton(
                                         icon: Icons.add_circle,
-                                        onPressed: () {
+                                        action: () {
                                           setState(() => _currentSize = (_currentSize + 2).clamp(10, 100));
                                           widget.onSubtitleFontSizeChanged(_currentSize);
                                         },
@@ -333,17 +363,17 @@ class _AccessibilityDialogState extends State<AccessibilityDialog> {
                                   trailing: Row(
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
-                                      _buildFocusableIconButton(
+                                      _buildRepeatingButton(
                                         icon: Icons.remove_circle,
-                                        onPressed: () {
+                                        action: () {
                                           setState(() => _currentDelay = double.parse((_currentDelay - 0.5).toStringAsFixed(1)));
                                           widget.onSubtitleDelayChanged(_currentDelay);
                                         },
                                       ),
                                       Text('${_currentDelay.toStringAsFixed(1)}s', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                                      _buildFocusableIconButton(
+                                      _buildRepeatingButton(
                                         icon: Icons.add_circle,
-                                        onPressed: () {
+                                        action: () {
                                           setState(() => _currentDelay = double.parse((_currentDelay + 0.5).toStringAsFixed(1)));
                                           widget.onSubtitleDelayChanged(_currentDelay);
                                         },
@@ -356,39 +386,23 @@ class _AccessibilityDialogState extends State<AccessibilityDialog> {
                                   trailing: Row(
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
-                                      _buildFocusableIconButton(
+                                      _buildRepeatingButton(
                                         icon: Icons.remove_circle,
-                                        onPressed: () {
+                                        action: () {
                                           setState(() => _currentHeight = (_currentHeight - 5).clamp(0, 500));
                                           widget.onSubtitleHeightChanged(_currentHeight);
                                         },
                                       ),
                                       Text('${_currentHeight.toInt()}', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                                      _buildFocusableIconButton(
+                                      _buildRepeatingButton(
                                         icon: Icons.add_circle,
-                                        onPressed: () {
+                                        action: () {
                                           setState(() => _currentHeight = (_currentHeight + 5).clamp(0, 500));
                                           widget.onSubtitleHeightChanged(_currentHeight);
                                         },
                                       ),
                                     ],
                                   ),
-                                ),
-                                const SizedBox(height: 20),
-                                Focus(
-                                  child: Builder(builder: (context) {
-                                    final bool hasFocus = Focus.of(context).hasFocus;
-                                    return ElevatedButton(
-                                      style: ElevatedButton.styleFrom(
-                                        backgroundColor: hasFocus ? Colors.redAccent : Colors.redAccent.withOpacity(0.2),
-                                        minimumSize: const Size(double.infinity, 50),
-                                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                                        side: const BorderSide(color: Colors.redAccent, width: 1.5),
-                                      ),
-                                      onPressed: widget.onReportIssue,
-                                      child: Text("REPORT ISSUE", style: TextStyle(color: hasFocus ? Colors.white : Colors.redAccent, fontWeight: FontWeight.bold)),
-                                    );
-                                  }),
                                 ),
                               ],
                             ),
@@ -406,24 +420,9 @@ class _AccessibilityDialogState extends State<AccessibilityDialog> {
                 Positioned(
                   top: 15,
                   right: 15,
-                  child: Focus(
-                    onKeyEvent: (node, event) {
-                      if (event is KeyDownEvent && (event.logicalKey == LogicalKeyboardKey.select || event.logicalKey == LogicalKeyboardKey.enter)) {
-                        Navigator.pop(context);
-                        return KeyEventResult.handled;
-                      }
-                      return KeyEventResult.ignored;
-                    },
-                    child: Builder(builder: (context) {
-                      final bool hasFocus = Focus.of(context).hasFocus;
-                      return Container(
-                        decoration: BoxDecoration(color: hasFocus ? Colors.white : Colors.white10, shape: BoxShape.circle),
-                        child: IconButton(
-                          icon: Icon(Icons.close, color: hasFocus ? Colors.black : Colors.white),
-                          onPressed: () => Navigator.pop(context),
-                        ),
-                      );
-                    }),
+                  child: IconButton(
+                    icon: const Icon(Icons.close, color: Colors.white),
+                    onPressed: () => Navigator.pop(context),
                   ),
                 ),
               ],
@@ -432,5 +431,11 @@ class _AccessibilityDialogState extends State<AccessibilityDialog> {
         ),
       ),
     );
+  }
+
+  @override
+  void dispose() {
+    _stopAction();
+    super.dispose();
   }
 }

@@ -129,7 +129,7 @@ class _HomeCarouselState extends State<HomeCarousel> {
                               begin: Alignment.bottomCenter,
                               end: Alignment.topCenter,
                               colors: [
-                                Colors.black.withOpacity(0.8),
+                                Colors.black.withOpacity(0.9),
                                 Colors.transparent,
                               ],
                             ),
@@ -146,28 +146,31 @@ class _HomeCarouselState extends State<HomeCarousel> {
                               Text(
                                 title.toUpperCase(),
                                 style: const TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.bold,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w900,
                                   color: Colors.white,
+                                  letterSpacing: 0.5,
                                 ),
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                               ),
-                              const SizedBox(height: 8),
+                              const SizedBox(height: 10),
                               Row(
                                 children: [
-                                  IconButton(
+                                  _buildCompactButton(
                                     onPressed: () => widget.playVideo(movie),
-                                    icon: const Icon(Icons.play_circle_fill, color: Colors.white, size: 30),
-                                    padding: EdgeInsets.zero,
-                                    constraints: const BoxConstraints(),
+                                    icon: Icons.play_arrow_rounded,
+                                    label: "Play",
+                                    color: Colors.white,
+                                    textColor: Colors.black,
                                   ),
-                                  const SizedBox(width: 15),
-                                  IconButton(
+                                  const SizedBox(width: 8),
+                                  _buildCompactButton(
                                     onPressed: () => widget.onToggleWatchlist(movie),
-                                    icon: Icon(isInWatchlist ? Icons.check_circle : Icons.add_circle_outline, color: Colors.white, size: 26),
-                                    padding: EdgeInsets.zero,
-                                    constraints: const BoxConstraints(),
+                                    icon: isInWatchlist ? Icons.check_rounded : Icons.add_rounded,
+                                    label: "Watchlist",
+                                    color: Colors.white.withOpacity(0.2),
+                                    textColor: Colors.white,
                                   ),
                                 ],
                               ),
@@ -182,6 +185,38 @@ class _HomeCarouselState extends State<HomeCarousel> {
             ),
           );
         },
+      ),
+    );
+  }
+
+  Widget _buildCompactButton({
+    required VoidCallback onPressed,
+    required IconData icon,
+    required String label,
+    required Color color,
+    required Color textColor,
+  }) {
+    return SizedBox(
+      height: 32,
+      child: TextButton.icon(
+        onPressed: onPressed,
+        style: TextButton.styleFrom(
+          backgroundColor: color,
+          foregroundColor: textColor,
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+          ),
+        ),
+        icon: Icon(icon, size: 18, color: textColor),
+        label: Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.bold,
+            color: textColor,
+          ),
+        ),
       ),
     );
   }

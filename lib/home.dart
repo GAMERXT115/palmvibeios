@@ -46,6 +46,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   bool _namesLoaded = false;
   bool _isHeaderScrolled = false;
   String _error = '';
+  bool _isSearchExpanded = false;
   
   int _currentPage = 0;
   final int _itemsPerPage = 18; 
@@ -430,21 +431,26 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   }
 
   void _showMovieDetails(Map<String, dynamic> movie) {
-    showDialog(
-      context: context,
-      builder: (context) => MovieDetailsModal(
-        movie: movie,
-        baseUrl: _baseUrl,
-        authHeader: _authHeader,
-        onPlay: _playVideo,
-        watchlist: _watchlist,
-        onToggleWatchlist: _toggleWatchlist,
-        serverIp: widget.serverIp,
-        serverPort: widget.serverPort,
-        username: widget.username,
-      ),
-    ).then((_) => setState(() {}));
-  }
+  setState(() {
+    _isSearchExpanded = false;
+  });
+  FocusScope.of(context).unfocus();
+  showDialog(
+    context: context,
+    builder: (context) => MovieDetailsModal(
+      movie: movie,
+      baseUrl: _baseUrl,
+      authHeader: _authHeader,
+      onPlay: _playVideo,
+      watchlist: _watchlist,
+      onToggleWatchlist: _toggleWatchlist,
+      serverIp: widget.serverIp,
+      serverPort: widget.serverPort,
+      username: widget.username,
+    ),
+  ).then((_) => setState(() {}));
+}
+
 
   void _playVideo(Map<String, dynamic> file) async {
     showDialog(
@@ -497,95 +503,167 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   }
 
   void _handleItemTap(Map<String, dynamic> item) {
-    final String itemPath = item['path'] ?? '';
-    if (itemPath.contains('TV Shows') && item['type'] == 'directory') {
-      setState(() {
-        _isSearching = false;
-        _searchController.clear();
-        _selectedTvShow = item;
-        _isInTvShowDetail = true;
-        _currentPath = [item['path']];
-      });
-      _loadInitialContent();
-    } else {
-      _showMovieDetails(item);
-    }
+  final String itemPath = item['path'] ?? '';
+  FocusScope.of(context).unfocus();
+  if (itemPath.contains('TV Shows') && item['type'] == 'directory') {
+    setState(() {
+      _isSearching = false;
+      _isSearchExpanded = false;
+      _searchController.clear();
+      _selectedTvShow = item;
+      _isInTvShowDetail = true;
+      _currentPath = [item['path']];
+    });
+    _loadInitialContent();
+  } else {
+    setState(() {
+      _isSearchExpanded = false;
+    });
+    _showMovieDetails(item);
   }
+}
+
 
   Widget _buildShimmerEffect() {
     return Container(color: Colors.grey[900]);
   }
 
-  Widget _buildNavHeader() {
-    return Container(
-      color: (_isHeaderScrolled || _isInTvShowDetail) ? Colors.black : Colors.black.withOpacity(0.4),
-      child: SafeArea(
-        bottom: false,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Row(
-                children: [
-                  if (_isInTvShowDetail) ...[
-                    IconButton(
-                      icon: const Icon(Icons.arrow_back, color: Colors.white, size: 24),
-                      onPressed: _navigateUp,
+  
+
+Widget _buildNavHeader() {
+  return Container(
+    color: (_isHeaderScrolled || _isInTvShowDetail) ? Colors.black : Colors.black.withOpacity(0.4),
+    child: SafeArea(
+      bottom: false,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              height: 48,
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 350),
+                reverseDuration: const Duration(milliseconds: 250),
+                transitionBuilder: (Widget child, Animation<double> animation) {
+                  return FadeTransition(
+                    opacity: animation,
+                    child: SlideTransition(
+                      position: Tween<Offset>(
+                        begin: const Offset(0.05, 0),
+                        end: Offset.zero,
+                      ).animate(CurvedAnimation(parent: animation, curve: Curves.easeOutCubic)),
+                      child: child,
                     ),
-                  ],
-                  GestureDetector(
-                    onTap: () => _changeCategory('Hollywood'),
-                    child: Row(
-                      children: [
-                        Container(
-                          width: 32,
-                          height: 32,
-                          decoration: const BoxDecoration(
-                            shape: BoxShape.circle,
-                            boxShadow: [BoxShadow(color: Color(0xFF8A2BE2), blurRadius: 8)],
-                          ),
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(16),
-                            child: Image.asset('assets/icon/app_icon.png'),
+                  );
+                },
+                child: _isSearchExpanded
+                    ? Container(
+                        key: const ValueKey('searchField'),
+                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.1),
+                          borderRadius: BorderRadius.circular(24),
+                        ),
+                        child: TextField(
+                          controller: _searchController,
+                          autofocus: true,
+                          style: const TextStyle(color: Colors.white, fontSize: 14),
+                          onChanged: _onSearchChanged,
+                          decoration: InputDecoration(
+                            hintText: 'Search movies...',
+                            hintStyle: TextStyle(color: Colors.white.withOpacity(0.5)),
+                            border: InputBorder.none,
+                            prefixIcon: const Icon(Icons.search, color: Colors.white70, size: 20),
+                            suffixIcon: IconButton(
+                              icon: const Icon(Icons.close, color: Colors.white70, size: 20),
+                              onPressed: () {
+                                setState(() {
+                                  _isSearchExpanded = false;
+                                  _isSearching = false;
+                                  _searchController.clear();
+                                  FocusScope.of(context).unfocus();
+                                });
+                              },
+                            ),
+                            contentPadding: const EdgeInsets.symmetric(vertical: 12),
                           ),
                         ),
-                        const SizedBox(width: 8),
-                        const Text(
-                          'PALM VIBE',
-                          style: TextStyle(fontSize: 14, fontWeight: FontWeight.w900, letterSpacing: 1.2, color: Colors.white),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const Spacer(),
-                  IconButton(
-                    icon: const Icon(Icons.logout, color: Colors.white70, size: 20),
-                    onPressed: () async {
-                      await BiometricService().setManualLogout(true);
-                      if (mounted) {
-                        Navigator.pushReplacement(
-                          context,
-                          MaterialPageRoute(builder: (context) => const ServerConfigScreen()),
-                        );
-                      }
-                    },
-                  ),
-                ],
+                      )
+                    : Row(
+                        key: const ValueKey('headerContent'),
+                        children: [
+                          if (_isInTvShowDetail)
+                            IconButton(
+                              icon: const Icon(Icons.arrow_back, color: Colors.white, size: 24),
+                              onPressed: _navigateUp,
+                            ),
+                          GestureDetector(
+                            onTap: () => _changeCategory('Hollywood'),
+                            child: Row(
+                              children: [
+                                Container(
+                                  width: 32,
+                                  height: 32,
+                                  decoration: const BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    boxShadow: [BoxShadow(color: Color(0xFF8A2BE2), blurRadius: 8)],
+                                  ),
+                                  child: ClipRRect(
+                                    borderRadius: BorderRadius.circular(16),
+                                    child: Image.asset('assets/icon/app_icon.png'),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                const Text(
+                                  'PALM VIBE',
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w900,
+                                    letterSpacing: 1.2,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const Spacer(),
+                          if (!_isInTvShowDetail)
+                            IconButton(
+                              icon: const Icon(Icons.search, color: Colors.white, size: 24),
+                              onPressed: () => setState(() => _isSearchExpanded = true),
+                            ),
+                          IconButton(
+                            icon: const Icon(Icons.logout, color: Colors.white70, size: 20),
+                            onPressed: () async {
+                              await BiometricService().setManualLogout(true);
+                              if (mounted) {
+                                Navigator.pushReplacement(
+                                  context,
+                                  MaterialPageRoute(builder: (context) => const ServerConfigScreen()),
+                                );
+                              }
+                            },
+                          ),
+                        ],
+                      ),
               ),
-              if (!_isInTvShowDetail) ...[
-                const SizedBox(height: 10),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: _categories.map((cat) => _buildNavItem(cat, _currentCategory == cat, () => _changeCategory(cat))).toList(),
-                ),
-              ],
+            ),
+            if (!_isInTvShowDetail && !_isSearchExpanded) ...[
+              const SizedBox(height: 10),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: _categories
+                    .map((cat) => _buildNavItem(cat, _currentCategory == cat, () => _changeCategory(cat)))
+                    .toList(),
+              ),
             ],
-          ),
+          ],
         ),
       ),
-    );
-  }
+    ),
+  );
+}
 
   Widget _buildNavItem(String label, bool isActive, VoidCallback onTap) {
     return GestureDetector(
@@ -696,7 +774,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     );
   }
 
-  Widget _buildContent() {
+    Widget _buildContent() {
     if (_isInTvShowDetail) {
       return Column(
         children: [
@@ -725,42 +803,113 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     }
 
     if (_isSearching) {
-      if (_isLoading) return const Center(child: CircularProgressIndicator(color: Colors.purple));
+      if (_isLoading) {
+        return Padding(
+          padding: EdgeInsets.only(top: MediaQuery.of(context).padding.top + 150),
+          child: const Center(
+            child: CircularProgressIndicator(color: Colors.purple),
+          ),
+        );
+      }
+      
+      final tvResults = _searchResults.where((item) => item['path'].toString().contains('TV Shows')).toList();
+      final movieResults = _searchResults.where((item) => !item['path'].toString().contains('TV Shows')).toList();
+
       return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           SizedBox(height: MediaQuery.of(context).padding.top + 100),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 10, 20, 0),
-            child: GridView.builder(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 3,
-                childAspectRatio: 0.65,
-                crossAxisSpacing: 10,
-                mainAxisSpacing: 15,
+          if (tvResults.isNotEmpty) ...[
+            const Padding(
+              padding: EdgeInsets.fromLTRB(20, 10, 20, 10),
+              child: Text(
+                'TV Shows',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white),
               ),
-              itemBuilder: (context, index) {
-                final item = _searchResults[index];
-                return MovieCard(
-                  movie: item,
-                  getPosterUrl: _getPosterUrl,
-                  authHeader: _authHeader,
-                  buildShimmerEffect: _buildShimmerEffect,
-                  onTap: () => _handleItemTap(item),
-                  serverIp: widget.serverIp,
-                  serverPort: widget.serverPort,
-                  username: widget.username,
-                );
-              },
-              itemCount: _searchResults.length,
             ),
-          ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: GridView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 3,
+                  childAspectRatio: 0.65,
+                  crossAxisSpacing: 10,
+                  mainAxisSpacing: 15,
+                ),
+                itemBuilder: (context, index) {
+                  final item = tvResults[index];
+                  return MovieCard(
+                    movie: item,
+                    getPosterUrl: _getPosterUrl,
+                    authHeader: _authHeader,
+                    buildShimmerEffect: _buildShimmerEffect,
+                    onTap: () => _handleItemTap(item),
+                    serverIp: widget.serverIp,
+                    serverPort: widget.serverPort,
+                    username: widget.username,
+                  );
+                },
+                itemCount: tvResults.length,
+              ),
+            ),
+            const SizedBox(height: 20),
+          ],
+          if (movieResults.isNotEmpty) ...[
+            const Padding(
+              padding: EdgeInsets.fromLTRB(20, 10, 20, 10),
+              child: Text(
+                'Movies',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: GridView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 3,
+                  childAspectRatio: 0.65,
+                  crossAxisSpacing: 10,
+                  mainAxisSpacing: 15,
+                ),
+                itemBuilder: (context, index) {
+                  final item = movieResults[index];
+                  return MovieCard(
+                    movie: item,
+                    getPosterUrl: _getPosterUrl,
+                    authHeader: _authHeader,
+                    buildShimmerEffect: _buildShimmerEffect,
+                    onTap: () => _handleItemTap(item),
+                    serverIp: widget.serverIp,
+                    serverPort: widget.serverPort,
+                    username: widget.username,
+                  );
+                },
+                itemCount: movieResults.length,
+              ),
+            ),
+          ],
+          if (tvResults.isEmpty && movieResults.isEmpty)
+            const Center(
+              child: Padding(
+                padding: EdgeInsets.only(top: 50),
+                child: Text(
+                  'No results found',
+                  style: TextStyle(color: Colors.white70, fontSize: 16),
+                ),
+              ),
+            ),
         ],
       );
     }
 
     if (_currentCategory == 'Watchlist') {
+      final watchlistTv = _watchlist.where((i) => i['path'].toString().contains('TV Shows')).toList();
+      final watchlistMovies = _watchlist.where((i) => !i['path'].toString().contains('TV Shows')).toList();
+
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -769,8 +918,50 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
             padding: EdgeInsets.fromLTRB(20, 20, 20, 10),
             child: Text('My Watchlist', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.white)),
           ),
-          _buildHorizontalMovieSection('TV Shows', _watchlist.where((i) => i['path'].toString().contains('TV Shows')).toList(), _watchlistScrollController),
-          _buildHorizontalMovieSection('Movies', _watchlist.where((i) => !i['path'].toString().contains('TV Shows')).toList(), ScrollController()),
+          if (watchlistTv.isNotEmpty)
+            _buildHorizontalMovieSection('TV Shows', watchlistTv, _watchlistScrollController),
+          if (watchlistMovies.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Movies', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
+                  const SizedBox(height: 15),
+                  GridView.builder(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 3,
+                      childAspectRatio: 0.65,
+                      crossAxisSpacing: 10,
+                      mainAxisSpacing: 15,
+                    ),
+                    itemBuilder: (context, index) {
+                      final movie = watchlistMovies[index];
+                      return MovieCard(
+                        movie: movie,
+                        getPosterUrl: _getPosterUrl,
+                        authHeader: _authHeader,
+                        buildShimmerEffect: _buildShimmerEffect,
+                        onTap: () => _handleItemTap(movie),
+                        serverIp: widget.serverIp,
+                        serverPort: widget.serverPort,
+                        username: widget.username,
+                      );
+                    },
+                    itemCount: watchlistMovies.length,
+                  ),
+                ],
+              ),
+            ),
+          if (watchlistTv.isEmpty && watchlistMovies.isEmpty)
+            const Center(
+              child: Padding(
+                padding: EdgeInsets.only(top: 50),
+                child: Text('Your watchlist is empty', style: TextStyle(color: Colors.white70, fontSize: 16)),
+              ),
+            ),
         ],
       );
     }

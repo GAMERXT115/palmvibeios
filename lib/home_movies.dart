@@ -3,7 +3,8 @@ import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as path;
 import 'dart:convert';
-import 'dart:ui';
+import 'dart:io';
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:youtube_player_flutter/youtube_player_flutter.dart';
 import 'video_progress_manager.dart';
 
@@ -274,8 +275,10 @@ class MovieDetailsModal extends StatefulWidget {
 
 class _MovieDetailsModalState extends State<MovieDetailsModal> {
   Map<String, dynamic>? _assets;
+  bool _isLoading = true;
   bool _isPlayingTrailer = false;
-  YoutubePlayerController? _youtubeController;
+  String? _trailerLocalUrl;
+  HttpServer? _localTrailerServer;
   final List<String> _timeStamps = ['00:10:00', '00:25:00', '00:45:00', '01:05:00', '01:25:00'];
 
   @override
@@ -295,31 +298,71 @@ class _MovieDetailsModalState extends State<MovieDetailsModal> {
       });
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
-        setState(() => _assets = data);
+        setState(() {
+          _assets = data;
+          _isLoading = false;
+        });
         _setupTrailer(data);
       }
-    } catch (e) {}
+    } catch (e) {
+      if (mounted) setState(() => _isLoading = false);
+    }
   }
 
   void _setupTrailer(Map<String, dynamic> data) {
     final metadata = data['metadata'] ?? {};
-    String? trailerUrl = metadata['trailer'] ?? data['trailer'];
-    if (trailerUrl != null) {
-      String? videoId = YoutubePlayer.convertUrlToId(trailerUrl);
-      if (videoId != null) {
-        _youtubeController = YoutubePlayerController(
-          initialVideoId: videoId,
-          flags: const YoutubePlayerFlags(
-            autoPlay: true,
-            mute: false,
-            disableDragSeek: true,
-            loop: true,
-            hideControls: true,
-          ),
-        );
-        setState(() => _isPlayingTrailer = true);
+    String? trailerUrl = metadata['trailer'] ?? data['trailer'] ?? metadata['Trailer'];
+    if (trailerUrl == null) return;
+
+    final videoId = YoutubePlayer.convertUrlToId(trailerUrl);
+    if (videoId == null) return;
+
+    _startLocalTrailerServer(videoId);
+  }
+
+  Future<void> _startLocalTrailerServer(String videoId) async {
+    try {
+      final html = '''
+      <!DOCTYPE html>
+      <html>
+      <head>
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <style>
+        html, body { margin:0; padding:0; background:#000; overflow:hidden; }
+        iframe { position:absolute; top:0; left:0; width:100%; height:100%; border:0; }
+      </style>
+      </head>
+      <body>
+      <iframe
+        src="https://www.youtube.com/embed/$videoId?autoplay=1&mute=0&loop=1&playlist=$videoId&rel=0&enablejsapi=1"
+        allow="autoplay; encrypted-media; fullscreen"
+        allowfullscreen>
+      </iframe>
+      </body>
+      </html>
+      ''';
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      _localTrailerServer = server;
+      server.listen((request) {
+        request.response
+          ..headers.contentType = ContentType.html
+          ..write(html);
+        request.response.close();
+      });
+
+      if (mounted) {
+        setState(() {
+          _trailerLocalUrl = 'http://127.0.0.1:${server.port}/trailer';
+          _isPlayingTrailer = true;
+        });
       }
-    }
+    } catch (e) {}
+  }
+
+  @override
+  void dispose() {
+    _localTrailerServer?.close(force: true);
+    super.dispose();
   }
 
   void _showFullScreenImage(String url, int index) {
@@ -354,12 +397,6 @@ class _MovieDetailsModalState extends State<MovieDetailsModal> {
   }
 
   @override
-  void dispose() {
-    _youtubeController?.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
     final metadata = _assets?['metadata'] ?? {};
     final bannerPath = _assets?['banner'] ?? widget.movie['path'];
@@ -383,12 +420,31 @@ class _MovieDetailsModalState extends State<MovieDetailsModal> {
                 Container(
                   height: 220,
                   width: double.infinity,
-                  child: _isPlayingTrailer && _youtubeController != null
-                      ? YoutubePlayer(controller: _youtubeController!, showVideoProgressIndicator: false)
+                  decoration: const BoxDecoration(
+                    borderRadius: BorderRadius.vertical(top: Radius.circular(15)),
+                    color: Colors.black,
+                  ),
+                  child: _isPlayingTrailer && _trailerLocalUrl != null
+                      ? ClipRRect(
+                          borderRadius: const BorderRadius.vertical(top: Radius.circular(15)),
+                          child: InAppWebView(
+                            initialUrlRequest: URLRequest(url: WebUri(_trailerLocalUrl!)),
+                            initialSettings: InAppWebViewSettings(
+                              mediaPlaybackRequiresUserGesture: false,
+                              transparentBackground: true,
+                            ),
+                            onReceivedError: (controller, request, error) {
+                              if (mounted) {
+                                setState(() => _isPlayingTrailer = false);
+                              }
+                            },
+                          ),
+                        )
                       : Image.network(
                           bannerUrl,
                           headers: {'Authorization': widget.authHeader, 'ngrok-skip-browser-warning': 'true'},
                           fit: BoxFit.cover,
+                          errorBuilder: (c, e, s) => Container(color: Colors.black),
                         ),
                 ),
                 Positioned(
