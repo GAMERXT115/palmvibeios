@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CLIENT_ID</key>
+	<string>384915080709-i7cfop74ipg56lrpi92o64ne0u7bp6n3.apps.googleusercontent.com</string>
+	<key>REVERSED_CLIENT_ID</key>
+	<string>com.googleusercontent.apps.384915080709-i7cfop74ipg56lrpi92o64ne0u7bp6n3</string>
+	<key>ANDROID_CLIENT_ID</key>
+	<string>384915080709-6739tu5i4lmfe45ue4rto72lovsqga9v.apps.googleusercontent.com</string>
+	<key>API_KEY</key>
+	<string>AIzaSyA1fwWZ2Vdp47-pwbRLF1HMBvqsv-eW2tA</string>
+	<key>GCM_SENDER_ID</key>
+	<string>384915080709</string>
+	<key>PLIST_VERSION</key>
+	<string>1</string>
+	<key>BUNDLE_ID</key>
+	<string>com.ham-tech.palmvibeios</string>
+	<key>PROJECT_ID</key>
+	<string>palmvibe-59ae2</string>
+	<key>STORAGE_BUCKET</key>
+	<string>palmvibe-59ae2.firebasestorage.app</string>
+	<key>IS_ADS_ENABLED</key>
+	<false></false>
+	<key>IS_ANALYTICS_ENABLED</key>
+	<false></false>
+	<key>IS_APPINVITE_ENABLED</key>
+	<true></true>
+	<key>IS_GCM_ENABLED</key>
+	<true></true>
+	<key>IS_SIGNIN_ENABLED</key>
+	<true></true>
+	<key>GOOGLE_APP_ID</key>
+	<string>1:384915080709:ios:be5216ffc597c95c7b3e6c</string>
+	<key>DATABASE_URL</key>
+	<string>https://palmvibe-59ae2-default-rtdb.europe-west1.firebasedatabase.app</string>
+</dict>
+</plist>
