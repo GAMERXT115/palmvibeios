@@ -77,6 +77,8 @@ class GlobalVideoManager with WidgetsBindingObserver {
   // Set to true to attempt native PiP for every format (e.g. if your server
   // remuxes everything to an AVPlayer-compatible stream).
   static const bool tryNativePipForAllFormats = true;
+  // Master switch for the iOS system PiP. Set to false to disable it completely.
+  static const bool enableNativePip = true;
 
   NativePictureInPicture? _nativePip;
   StreamSubscription<dynamic>? _nativePipEventSub;
@@ -98,7 +100,7 @@ class GlobalVideoManager with WidgetsBindingObserver {
   }
 
   Future<void> _setupNativePip(String url, String user, String pass) async {
-    if (!Platform.isIOS) return;
+    if (!enableNativePip || !Platform.isIOS) return;
     final int gen = ++_nativeGeneration;
     final Player? mkPlayer = player;
     if (mkPlayer == null) return;
@@ -132,9 +134,22 @@ class GlobalVideoManager with WidgetsBindingObserver {
       WidgetsBinding.instance.addObserver(this);
       _nativeSyncTimer?.cancel();
       _nativeSyncTimer = Timer.periodic(const Duration(seconds: 10), (_) => _presyncNativePip());
+      // The native player can start playing by itself once its stream has loaded, which
+      // causes double audio. Keep forcing it to stay paused unless PiP is really active.
+      _nativeGuardTicks = 0;
+      _nativeGuardTimer?.cancel();
+      _nativeGuardTimer = Timer.periodic(const Duration(milliseconds: 250), (_) {
+        _nativeGuardTicks++;
+        if (_nativeGuardTicks > 80 && _nativeGuardTicks % 4 != 0) return;
+        _guardPause();
+      });
+      _guardPause();
       debugPrint('[NativePiP] ready');
       _nativePipEventSub = pip.onPipEvent.listen(_onNativePipEvent);
-      _nativePlayingSub = mkPlayer.stream.playing.listen((_) => _refreshNativeAutoPip());
+      _nativePlayingSub = mkPlayer.stream.playing.listen((_) {
+        _guardPause();
+        _refreshNativeAutoPip();
+      });
       _refreshNativeAutoPip();
     } catch (e) {
       debugPrint('[NativePiP] setup failed: $e');
@@ -143,6 +158,14 @@ class GlobalVideoManager with WidgetsBindingObserver {
   }
 
   Timer? _nativeSyncTimer;
+  Timer? _nativeGuardTimer;
+  int _nativeGuardTicks = 0;
+
+  void _guardPause() {
+    final pip = _nativePip;
+    if (pip == null || _nativePipActive || _startingNativePip) return;
+    pip.pause().catchError((_) {});
+  }
   bool _startingNativePip = false;
 
   // Keeps the (paused) native player near the current position so PiP starts in the right place.
@@ -179,6 +202,7 @@ class GlobalVideoManager with WidgetsBindingObserver {
       await Future.delayed(const Duration(milliseconds: 1500));
       final active = _nativePipActive || await pip.isPipActive();
       debugPrint('[NativePiP] PiP active: $active');
+      if (active) _nativePipActive = true;
       if (!active) await pip.pause(); // PiP could not start (e.g. unsupported format): avoid double audio
     } catch (e) {
       debugPrint('[NativePiP] start failed: $e');
@@ -239,6 +263,8 @@ class GlobalVideoManager with WidgetsBindingObserver {
     _nativeGeneration++;
     _nativeSyncTimer?.cancel();
     _nativeSyncTimer = null;
+    _nativeGuardTimer?.cancel();
+    _nativeGuardTimer = null;
     WidgetsBinding.instance.removeObserver(this);
     _nativePipEventSub?.cancel();
     _nativePipEventSub = null;
