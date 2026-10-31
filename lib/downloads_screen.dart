@@ -62,18 +62,6 @@ Future<void> playDownloadedItem(BuildContext context, DownloadItem item, List<Do
   }
 }
 
-List<DownloadItem> _sortedEpisodes(Iterable<DownloadItem> eps) {
-  final list = eps.toList();
-  list.sort((a, b) {
-    final s = a.seasonNo.compareTo(b.seasonNo);
-    if (s != 0) return s;
-    final e = a.episodeNo.compareTo(b.episodeNo);
-    if (e != 0) return e;
-    return a.fileName.toLowerCase().compareTo(b.fileName.toLowerCase());
-  });
-  return list;
-}
-
 String _statusText(DownloadItem i) {
   switch (i.status) {
     case DlStatus.queued:
@@ -86,10 +74,24 @@ String _statusText(DownloadItem i) {
     case DlStatus.paused:
       return i.total > 0 ? 'Paused  •  ${(i.progress * 100).toStringAsFixed(0)}%' : 'Paused';
     case DlStatus.failed:
-      return 'Failed: ${i.error ?? 'unknown error'}';
+      return i.autoRetry ? '${i.error ?? 'Failed'} — will retry automatically' : 'Failed: ${i.error ?? 'unknown error'}';
     case DlStatus.completed:
       return formatBytes(i.total);
   }
+}
+
+double _groupProgress(Iterable<DownloadItem?> items, int total) {
+  if (total <= 0) return 0;
+  double sum = 0;
+  for (final i in items) {
+    if (i == null) continue;
+    if (i.status == DlStatus.completed) {
+      sum += 1;
+    } else if (i.total > 0) {
+      sum += i.progress;
+    }
+  }
+  return (sum / total).clamp(0.0, 1.0);
 }
 
 // ====================================================================
@@ -111,6 +113,7 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
   void initState() {
     super.initState();
     _m.ensureInit().then((_) {
+      _m.startBackground();
       if (mounted) setState(() => _ready = true);
     });
   }
@@ -120,23 +123,18 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
         child: Text(text, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
       );
 
-  Widget _activeTile(DownloadItem i) {
-    final title = i.isMovie ? i.title : '${i.showName ?? ''} • ${i.title}';
-    final poster = i.isMovie ? i.posterFile : (_m.showFor(i.showPath ?? '')?.posterFile ?? i.thumbFile);
+  Widget _movieActiveTile(DownloadItem i) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
       child: Row(
         children: [
-          ClipRRect(
-            borderRadius: BorderRadius.circular(6),
-            child: _localImage(_m, poster, width: 52, height: 74),
-          ),
+          ClipRRect(borderRadius: BorderRadius.circular(6), child: _localImage(_m, i.posterFile, width: 52, height: 74)),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 14)),
+                Text(i.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 14)),
                 const SizedBox(height: 8),
                 ClipRRect(
                   borderRadius: BorderRadius.circular(2),
@@ -149,7 +147,7 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
                 ),
                 const SizedBox(height: 6),
                 Text(_statusText(i),
-                    maxLines: 1,
+                    maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(color: i.status == DlStatus.failed ? Colors.redAccent : Colors.white54, fontSize: 11)),
               ],
@@ -158,7 +156,10 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
           if (i.isActive)
             IconButton(icon: const Icon(Icons.pause_circle_outline, color: Colors.white), onPressed: () => _m.pause(i.id))
           else
-            IconButton(icon: Icon(i.status == DlStatus.failed ? Icons.refresh_rounded : Icons.play_circle_outline, color: Colors.white), onPressed: () => _m.resume(i.id)),
+            IconButton(
+              icon: Icon(i.status == DlStatus.failed ? Icons.refresh_rounded : Icons.play_circle_outline, color: Colors.white),
+              onPressed: () => _m.resume(i.id),
+            ),
           IconButton(
             icon: const Icon(Icons.close, color: Colors.white54),
             onPressed: () async {
@@ -213,17 +214,22 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
   Widget _showTile(String showPath) {
     final show = _m.showFor(showPath);
     final eps = _m.itemsForShow(showPath).toList();
+    final catalogIds = _m.catalogIds(showPath);
+    final total = catalogIds.isNotEmpty ? catalogIds.length : eps.length;
     final done = eps.where((e) => e.status == DlStatus.completed).length;
-    final seasons = eps.map((e) => e.seasonName ?? '').toSet().length;
+    final active = eps.any((e) => e.isActive);
+    final waiting = eps.any((e) => e.status == DlStatus.failed && e.autoRetry);
+    final seasonCount = show != null && show.seasons.isNotEmpty ? show.seasons.length : eps.map((e) => e.seasonName ?? '').toSet().length;
     final name = show?.name ?? (eps.isNotEmpty ? eps.first.showName ?? '' : '');
-    final poster = show?.posterFile;
+    final progress = _groupProgress(catalogIds.isNotEmpty ? catalogIds.map(_m.itemFor) : eps, total);
+
     return InkWell(
       onTap: () => Navigator.push(context, MaterialPageRoute(builder: (c) => DownloadedShowScreen(showPath: showPath))),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
         child: Row(
           children: [
-            ClipRRect(borderRadius: BorderRadius.circular(6), child: _localImage(_m, poster, width: 52, height: 74, fallback: Icons.tv)),
+            ClipRRect(borderRadius: BorderRadius.circular(6), child: _localImage(_m, show?.posterFile, width: 52, height: 74, fallback: Icons.tv)),
             const SizedBox(width: 12),
             Expanded(
               child: Column(
@@ -231,7 +237,17 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
                 children: [
                   Text(name, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 15)),
                   const SizedBox(height: 4),
-                  Text('$done of ${eps.length} episodes  •  $seasons season${seasons == 1 ? '' : 's'}', style: const TextStyle(color: _lightPurple, fontSize: 12)),
+                  Text('$done of $total episodes  •  $seasonCount season${seasonCount == 1 ? '' : 's'}', style: const TextStyle(color: _lightPurple, fontSize: 12)),
+                  if (active || waiting) ...[
+                    const SizedBox(height: 8),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(2),
+                      child: LinearProgressIndicator(value: active ? progress : null, minHeight: 3, color: _purple, backgroundColor: Colors.white12),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(active ? 'Downloading…' : 'Waiting for connection — will retry automatically',
+                        style: const TextStyle(color: Colors.white54, fontSize: 11)),
+                  ],
                 ],
               ),
             ),
@@ -269,14 +285,15 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
                   : AnimatedBuilder(
                       animation: _m,
                       builder: (c, _) {
-                        final pending = _m.items.where((i) => i.status != DlStatus.completed).toList()
+                        // TV episodes never appear individually here: every show is a single entry.
+                        final pendingMovies = _m.movies.where((i) => i.status != DlStatus.completed).toList()
                           ..sort((a, b) => a.addedAt.compareTo(b.addedAt));
                         final movies = _m.movies.where((i) => i.status == DlStatus.completed).toList()
                           ..sort((a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()));
-                        final shows = _m.showPaths.where((sp) => _m.itemsForShow(sp).any((e) => e.status == DlStatus.completed)).toList()
+                        final shows = _m.showPaths.toList()
                           ..sort((a, b) => (_m.showFor(a)?.name ?? a).toLowerCase().compareTo((_m.showFor(b)?.name ?? b).toLowerCase()));
 
-                        if (pending.isEmpty && movies.isEmpty && shows.isEmpty) {
+                        if (pendingMovies.isEmpty && movies.isEmpty && shows.isEmpty) {
                           return const Center(
                             child: Column(
                               mainAxisSize: MainAxisSize.min,
@@ -293,13 +310,13 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
                           physics: const BouncingScrollPhysics(),
                           padding: const EdgeInsets.only(bottom: 40),
                           children: [
-                            if (pending.isNotEmpty) ...[
-                              _sectionTitle('In Progress'),
-                              ...pending.map(_activeTile),
-                            ],
                             if (shows.isNotEmpty) ...[
                               _sectionTitle('TV Shows'),
                               ...shows.map(_showTile),
+                            ],
+                            if (pendingMovies.isNotEmpty) ...[
+                              _sectionTitle('Movies In Progress'),
+                              ...pendingMovies.map(_movieActiveTile),
                             ],
                             if (movies.isNotEmpty) ...[
                               _sectionTitle('Movies'),
@@ -318,12 +335,75 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
 }
 
 // ====================================================================
-// Downloaded show (seasons + episodes)
+// Show screen: the full episode menu, downloaded or not
 // ====================================================================
+
+class _EpRow {
+  final String id;
+  final String path;
+  final String fileName;
+  final String title;
+  final int size;
+  final String season;
+  final DownloadItem? item;
+  _EpRow({required this.id, required this.path, required this.fileName, required this.title, required this.size, required this.season, required this.item});
+
+  Map<String, dynamic> toServerMap() => {'name': fileName, 'path': path, 'size': size};
+}
 
 class DownloadedShowScreen extends StatelessWidget {
   final String showPath;
   const DownloadedShowScreen({Key? key, required this.showPath}) : super(key: key);
+
+  List<MapEntry<String, List<_EpRow>>> _buildSeasons(DownloadManager m, DownloadShow? show) {
+    final result = <String, List<_EpRow>>{};
+    final knownIds = <String>{};
+
+    if (show != null) {
+      for (final s in show.seasons) {
+        result[s.name] = s.episodes.map((e) {
+          knownIds.add(e.id);
+          return _EpRow(id: e.id, path: e.path, fileName: e.name, title: e.title, size: e.size, season: s.name, item: m.itemFor(e.id));
+        }).toList();
+      }
+    }
+    // Downloads that are not part of a saved catalog (e.g. downloaded before the catalog existed)
+    final extras = m.itemsForShow(showPath).where((i) => !knownIds.contains(i.id)).toList()
+      ..sort((a, b) {
+        final s = a.seasonNo.compareTo(b.seasonNo);
+        return s != 0 ? s : a.episodeNo.compareTo(b.episodeNo);
+      });
+    for (final i in extras) {
+      final season = i.seasonName ?? 'Episodes';
+      result.putIfAbsent(season, () => []).add(_EpRow(
+        id: i.id,
+        path: i.serverPath,
+        fileName: i.fileName,
+        title: i.title,
+        size: i.total,
+        season: season,
+        item: i,
+      ));
+    }
+    return result.entries.toList();
+  }
+
+  Future<void> _queueRows(BuildContext context, DownloadManager m, DownloadShow? show, String showName, List<_EpRow> rows) async {
+    if (rows.isEmpty) return;
+    final bySeason = <String, List<_EpRow>>{};
+    for (final r in rows) {
+      bySeason.putIfAbsent(r.season, () => []).add(r);
+    }
+    for (final entry in bySeason.entries) {
+      await m.enqueueEpisodes(
+        showName: showName,
+        showPath: showPath,
+        seasonName: entry.key,
+        episodes: entry.value.map((r) => r.toServerMap()).toList(),
+        category: show?.category,
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -334,17 +414,15 @@ class DownloadedShowScreen extends StatelessWidget {
         animation: m,
         builder: (context, _) {
           final show = m.showFor(showPath);
-          final all = _sortedEpisodes(m.itemsForShow(showPath));
-          final playable = all.where((e) => e.status == DlStatus.completed).toList();
-          final name = show?.name ?? (all.isNotEmpty ? all.first.showName ?? '' : '');
+          final seasons = _buildSeasons(m, show);
+          final allRows = seasons.expand((e) => e.value).toList();
+          final playable = allRows.where((r) => r.item?.status == DlStatus.completed).map((r) => r.item!).toList();
+          final first = m.itemsForShow(showPath).isNotEmpty ? m.itemsForShow(showPath).first : null;
+          final name = show?.name ?? first?.showName ?? '';
           final md = show?.metadata ?? {};
           final description = (md['Description'] ?? md['description'] ?? '').toString();
           final headerImage = m.fileExists(show?.bannerFile) ? show?.bannerFile : show?.posterFile;
-
-          final seasons = <String, List<DownloadItem>>{};
-          for (final e in all) {
-            seasons.putIfAbsent(e.seasonName ?? 'Episodes', () => []).add(e);
-          }
+          final doneCount = playable.length;
 
           return ListView(
             padding: EdgeInsets.zero,
@@ -370,10 +448,16 @@ class DownloadedShowScreen extends StatelessWidget {
                         children: [
                           IconButton(icon: const Icon(Icons.arrow_back, color: Colors.white), onPressed: () => Navigator.pop(context)),
                           const Spacer(),
+                          DownloadGroupButton(
+                            tooltip: 'Download all episodes',
+                            size: 26,
+                            idsSelector: (mm) => allRows.map((r) => r.id).toList(),
+                            onDownload: () => _queueRows(context, m, show, name, allRows),
+                          ),
                           IconButton(
                             icon: const Icon(Icons.delete_outline, color: Colors.white70),
                             onPressed: () async {
-                              final yes = await confirmDialog(context, 'Delete show?', 'Delete all downloaded episodes of "$name"?');
+                              final yes = await confirmDialog(context, 'Delete show?', 'Delete "$name" and all of its downloaded episodes?');
                               if (yes) {
                                 await m.removeShow(showPath);
                                 if (context.mounted) Navigator.pop(context);
@@ -388,23 +472,47 @@ class DownloadedShowScreen extends StatelessWidget {
                     left: 20,
                     right: 20,
                     bottom: 16,
-                    child: Text(name, style: const TextStyle(fontSize: 26, fontWeight: FontWeight.bold, color: Colors.white)),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(name, style: const TextStyle(fontSize: 26, fontWeight: FontWeight.bold, color: Colors.white)),
+                        const SizedBox(height: 4),
+                        Text('$doneCount of ${allRows.length} episodes downloaded  •  ${seasons.length} season${seasons.length == 1 ? '' : 's'}',
+                            style: const TextStyle(color: _lightPurple, fontSize: 12)),
+                      ],
+                    ),
                   ),
                 ],
               ),
               if (description.isNotEmpty)
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
+                  padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
                   child: Text(description, style: const TextStyle(color: Colors.white70, fontSize: 14, height: 1.5)),
                 ),
-              ...(seasons.keys.toList()..sort((a, b) => seasonNumberOf(a).compareTo(seasonNumberOf(b)))).expand((season) {
-                final eps = seasons[season]!;
+              if (show != null && show.seasons.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(20, 8, 20, 8),
+                  child: Text('The full episode list will appear here once the server can be reached.',
+                      style: TextStyle(color: Colors.white38, fontSize: 12)),
+                ),
+              ...seasons.expand((entry) {
+                final rows = entry.value;
                 return [
                   Padding(
-                    padding: const EdgeInsets.fromLTRB(20, 16, 20, 6),
-                    child: Text(season, style: const TextStyle(color: _lightPurple, fontWeight: FontWeight.bold, fontSize: 15)),
+                    padding: const EdgeInsets.fromLTRB(20, 16, 12, 6),
+                    child: Row(
+                      children: [
+                        Expanded(child: Text(entry.key, style: const TextStyle(color: _lightPurple, fontWeight: FontWeight.bold, fontSize: 15))),
+                        DownloadGroupButton(
+                          tooltip: 'Download season',
+                          size: 22,
+                          idsSelector: (mm) => rows.map((r) => r.id).toList(),
+                          onDownload: () => _queueRows(context, m, show, name, rows),
+                        ),
+                      ],
+                    ),
                   ),
-                  ...eps.map((e) => _episodeTile(context, m, e, playable)),
+                  ...rows.map((r) => _episodeTile(context, m, show, name, r, playable)),
                 ];
               }),
               const SizedBox(height: 40),
@@ -415,73 +523,92 @@ class DownloadedShowScreen extends StatelessWidget {
     );
   }
 
-  Widget _episodeTile(BuildContext context, DownloadManager m, DownloadItem e, List<DownloadItem> playable) {
-    final done = e.status == DlStatus.completed;
+  Widget _episodeTile(BuildContext context, DownloadManager m, DownloadShow? show, String showName, _EpRow r, List<DownloadItem> playable) {
+    final e = r.item;
+    final done = e?.status == DlStatus.completed;
+    final notDownloaded = e == null;
+    final thumbRel = show != null && m.fileExists(show.thumbRel(r.id)) ? show.thumbRel(r.id) : e?.thumbFile;
+
+    Future<void> queueThis() async {
+      await _queueRows(context, m, show, showName, [r]);
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Queued ${r.title}'), duration: const Duration(seconds: 2)));
+      }
+    }
+
     return InkWell(
-      onTap: done ? () => playDownloadedItem(context, e, playable) : null,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-        child: Row(
-          children: [
-            SizedBox(
-              width: 100,
-              height: 60,
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(6),
-                child: Stack(
-                  fit: StackFit.expand,
+      onTap: done
+          ? () => playDownloadedItem(context, e!, playable)
+          : (notDownloaded ? queueThis : null),
+      child: Opacity(
+        opacity: notDownloaded ? 0.4 : 1.0,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+          child: Row(
+            children: [
+              SizedBox(
+                width: 100,
+                height: 60,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(6),
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      _localImage(m, thumbRel, width: 100, height: 60),
+                      if (done) const Center(child: Icon(Icons.play_arrow, color: Colors.white, size: 24)),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    _localImage(m, e.thumbFile, width: 100, height: 60),
-                    if (done) const Center(child: Icon(Icons.play_arrow, color: Colors.white, size: 24)),
+                    Text(r.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500)),
+                    const SizedBox(height: 4),
+                    if (e != null && !done)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 4),
+                        child: LinearProgressIndicator(
+                          value: (e.status == DlStatus.downloading && e.total > 0) || e.status == DlStatus.paused ? e.progress : null,
+                          minHeight: 3,
+                          color: _purple,
+                          backgroundColor: Colors.white12,
+                        ),
+                      ),
+                    Text(
+                      e == null ? 'Not downloaded — tap to download' : _statusText(e),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(color: e?.status == DlStatus.failed ? Colors.redAccent : Colors.white54, fontSize: 11),
+                    ),
                   ],
                 ),
               ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(e.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500)),
-                  const SizedBox(height: 4),
-                  if (!done)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 4),
-                      child: LinearProgressIndicator(
-                        value: (e.status == DlStatus.downloading && e.total > 0) || e.status == DlStatus.paused ? e.progress : null,
-                        minHeight: 3,
-                        color: _purple,
-                        backgroundColor: Colors.white12,
-                      ),
-                    ),
-                  Text(_statusText(e),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(color: e.status == DlStatus.failed ? Colors.redAccent : Colors.white54, fontSize: 11)),
-                ],
-              ),
-            ),
-            if (!done)
-              IconButton(
-                icon: Icon(e.isActive ? Icons.pause_circle_outline : Icons.play_circle_outline, color: Colors.white),
-                onPressed: () => e.isActive ? m.pause(e.id) : m.resume(e.id),
-              ),
-            IconButton(
-              icon: Icon(done ? Icons.delete_outline : Icons.close, color: Colors.white54),
-              onPressed: () async {
-                final yes = await confirmDialog(
-                  context,
-                  done ? 'Delete episode?' : 'Cancel download?',
-                  done ? 'Delete "${e.title}" from this device?' : 'Remove "${e.title}" and its partial data?',
-                  confirm: done ? 'DELETE' : 'REMOVE',
-                );
-                if (yes) {
-                  await m.remove(e.id);
-                  if (m.itemsForShow(showPath).isEmpty && context.mounted) Navigator.pop(context);
-                }
-              },
-            ),
-          ],
+              if (e == null)
+                IconButton(icon: const Icon(Icons.download_rounded, color: Colors.white), onPressed: queueThis)
+              else ...[
+                if (!done)
+                  IconButton(
+                    icon: Icon(e.isActive ? Icons.pause_circle_outline : (e.status == DlStatus.failed ? Icons.refresh_rounded : Icons.play_circle_outline), color: Colors.white),
+                    onPressed: () => e.isActive ? m.pause(e.id) : m.resume(e.id),
+                  ),
+                IconButton(
+                  icon: Icon(done ? Icons.delete_outline : Icons.close, color: Colors.white54),
+                  onPressed: () async {
+                    final yes = await confirmDialog(
+                      context,
+                      done ? 'Delete episode?' : 'Cancel download?',
+                      done ? 'Delete "${e.title}" from this device?' : 'Remove "${e.title}" and its partial data?',
+                      confirm: done ? 'DELETE' : 'REMOVE',
+                    );
+                    if (yes) await m.remove(e.id);
+                  },
+                ),
+              ],
+            ],
+          ),
         ),
       ),
     );

@@ -10,6 +10,7 @@ import 'firebase_options.dart';
 import 'splash_screen.dart';
 import 'login.dart';
 import 'video_player.dart';
+import 'download_manager.dart';
 import 'package:firebase_database/firebase_database.dart';
 
 class CustomHttpOverrides extends HttpOverrides {
@@ -51,6 +52,8 @@ void main() async {
   ]);
 
   HttpOverrides.global = CustomHttpOverrides();
+  // Resumes unfinished downloads and keeps retrying failed ones in the background
+  DownloadManager.instance.startBackground();
   runApp(const MyApp());
 }
 

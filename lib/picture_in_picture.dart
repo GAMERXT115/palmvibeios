@@ -10,7 +10,7 @@ import 'package:native_picture_in_picture/native_picture_in_picture.dart';
 import 'package:native_picture_in_picture/pip_event.dart';
 import 'video_player.dart';
 
-class GlobalVideoManager {
+class GlobalVideoManager with WidgetsBindingObserver {
   static final GlobalVideoManager _instance = GlobalVideoManager._internal();
   factory GlobalVideoManager() => _instance;
   GlobalVideoManager._internal();
@@ -76,7 +76,7 @@ class GlobalVideoManager {
   static const Set<String> _nativePipFormats = {'mp4', 'm4v', 'mov'};
   // Set to true to attempt native PiP for every format (e.g. if your server
   // remuxes everything to an AVPlayer-compatible stream).
-  static const bool tryNativePipForAllFormats = false;
+  static const bool tryNativePipForAllFormats = true;
 
   NativePictureInPicture? _nativePip;
   StreamSubscription<dynamic>? _nativePipEventSub;
@@ -119,19 +119,74 @@ class GlobalVideoManager {
         nativeUrl = url.contains('?') ? '$url&auth=$raw' : '$url?auth=$raw';
       }
 
+      debugPrint('[NativePiP] initializing native player: $nativeUrl');
       await pip.initialize(nativeUrl);
       if (gen != _nativeGeneration || player != mkPlayer) {
         await pip.dispose();
         return;
       }
+      await pip.pause(); // the native player must never play on its own (double audio)
       await pip.setAutoPipEnabled(false);
       _nativePip = pip;
       _nativePipReady = true;
+      WidgetsBinding.instance.addObserver(this);
+      _nativeSyncTimer?.cancel();
+      _nativeSyncTimer = Timer.periodic(const Duration(seconds: 10), (_) => _presyncNativePip());
+      debugPrint('[NativePiP] ready');
       _nativePipEventSub = pip.onPipEvent.listen(_onNativePipEvent);
       _nativePlayingSub = mkPlayer.stream.playing.listen((_) => _refreshNativeAutoPip());
       _refreshNativeAutoPip();
     } catch (e) {
+      debugPrint('[NativePiP] setup failed: $e');
       _nativePipReady = false;
+    }
+  }
+
+  Timer? _nativeSyncTimer;
+  bool _startingNativePip = false;
+
+  // Keeps the (paused) native player near the current position so PiP starts in the right place.
+  void _presyncNativePip() {
+    final pip = _nativePip;
+    final pl = player;
+    if (pip == null || pl == null || !_nativePipReady || _nativePipActive || !pl.state.playing) return;
+    pip.seekTo(pl.state.position).catchError((_) {});
+  }
+
+  // Leaving the app (home swipe / another app) while playing -> start system PiP explicitly.
+  // The plugin's automatic start can fail because its native player is paused at that moment.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.inactive || state == AppLifecycleState.hidden) {
+      _startNativePipNow();
+    } else if (state == AppLifecycleState.resumed) {
+      final pip = _nativePip;
+      if (pip != null && !_nativePipActive) pip.pause().catchError((_) {});
+    }
+  }
+
+  Future<void> _startNativePipNow() async {
+    final pip = _nativePip;
+    final pl = player;
+    if (pip == null || pl == null || !_nativePipReady || _nativePipActive || _startingNativePip) return;
+    if (!pl.state.playing) return;
+    _startingNativePip = true;
+    try {
+      debugPrint('[NativePiP] app leaving foreground, starting PiP at ${pl.state.position}');
+      await pip.seekTo(pl.state.position);
+      await pip.play();
+      await pip.startPiP();
+      await Future.delayed(const Duration(milliseconds: 1500));
+      final active = _nativePipActive || await pip.isPipActive();
+      debugPrint('[NativePiP] PiP active: $active');
+      if (!active) await pip.pause(); // PiP could not start (e.g. unsupported format): avoid double audio
+    } catch (e) {
+      debugPrint('[NativePiP] start failed: $e');
+      try {
+        await pip.pause();
+      } catch (_) {}
+    } finally {
+      _startingNativePip = false;
     }
   }
 
@@ -148,6 +203,7 @@ class GlobalVideoManager {
     final pl = player;
     if (pip == null || pl == null) return;
     try {
+      debugPrint('[NativePiP] event: $event');
       if (event == PipEvent.willStart) {
         _nativePipActive = true;
         _nativeRestoreRequested = false;
@@ -181,6 +237,9 @@ class GlobalVideoManager {
 
   void _teardownNativePip() {
     _nativeGeneration++;
+    _nativeSyncTimer?.cancel();
+    _nativeSyncTimer = null;
+    WidgetsBinding.instance.removeObserver(this);
     _nativePipEventSub?.cancel();
     _nativePipEventSub = null;
     _nativePlayingSub?.cancel();

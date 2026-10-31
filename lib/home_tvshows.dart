@@ -315,7 +315,7 @@ class _TvShowDetailWidgetState extends State<TvShowDetailWidget> {
                         DownloadGroupButton(
                           tooltip: 'Download whole show',
                           size: 28,
-                          selector: (m) => m.itemsForShow(_showPath),
+                          idsSelector: (m) => m.catalogIds(_showPath),
                           onDownload: _downloadWholeShow,
                         ),
                         IconButton(
@@ -362,8 +362,7 @@ class _TvShowDetailWidgetState extends State<TvShowDetailWidget> {
               DownloadGroupButton(
                 tooltip: 'Download season',
                 size: 26,
-                expected: sortedEpisodes.length,
-                selector: (m) => m.itemsForSeason(_showPath, widget.selectedSeason ?? ''),
+                idsSelector: (m) => sortedEpisodes.map((e) => DownloadManager.idFor(e['path'].toString())).toList(),
                 onDownload: () => _downloadSeason(sortedEpisodes),
               ),
             ]),
@@ -462,11 +461,19 @@ class _TvShowDetailWidgetState extends State<TvShowDetailWidget> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg), duration: const Duration(seconds: 2)));
   }
 
+  String get _downloadCategory => widget.currentCategory == 'Watchlist' ? 'Hollywood' : widget.currentCategory;
+
   Future<int> _queueEpisodes(List<Map<String, dynamic>> eps, String seasonName) async {
     final m = DownloadManager.instance;
     await m.ensureInit();
     m.configure(ip: widget.serverIp, port: widget.serverPort, authHeader: widget.authHeader);
-    return m.enqueueEpisodes(showName: _showName, showPath: _showPath, seasonName: seasonName, episodes: eps);
+    return m.enqueueEpisodes(
+      showName: _showName,
+      showPath: _showPath,
+      seasonName: seasonName,
+      episodes: eps,
+      category: _downloadCategory,
+    );
   }
 
   Future<void> _downloadEpisode(Map<String, dynamic> ep) async {
@@ -476,50 +483,30 @@ class _TvShowDetailWidgetState extends State<TvShowDetailWidget> {
 
   Future<void> _downloadSeason(List<Map<String, dynamic>> eps) async {
     if (eps.isEmpty) return;
-    await _queueEpisodes(eps, widget.selectedSeason ?? '');
-    _snack('Downloading ${widget.selectedSeason ?? 'season'} (${eps.length} episodes)');
-  }
-
-  bool _isVideoName(String name) {
-    final dot = name.lastIndexOf('.');
-    if (dot < 0) return false;
-    return ['.mp4', '.mov', '.avi', '.mkv', '.wmv', '.flv', '.webm', '.m4v', '.ts'].contains(name.substring(dot).toLowerCase());
+    final added = await _queueEpisodes(eps, widget.selectedSeason ?? '');
+    _snack(added == 0 ? 'Nothing new to download' : 'Downloading $added episode${added == 1 ? '' : 's'}');
   }
 
   Future<void> _downloadWholeShow() async {
-    if (widget.seasons.isEmpty) {
-      _snack('No seasons found');
-      return;
-    }
     final yes = await confirmDialog(
       context,
       'Download whole show?',
-      'Download all ${widget.seasons.length} seasons of "$_showName" to this device?',
+      'Download every season of "$_showName" to this device? Episodes that are already downloaded or downloading are skipped.',
       confirm: 'DOWNLOAD',
     );
     if (!yes) return;
     _snack('Preparing download…');
-    final String category = widget.currentCategory == 'Watchlist' ? 'Hollywood' : widget.currentCategory;
-    int total = 0;
-    for (final season in widget.seasons) {
-      try {
-        final uri = Uri.parse('http://${widget.serverIp}:${widget.serverPort}/api/browse').replace(queryParameters: {
-          'category': category,
-          'path': season['path'].toString(),
-          'limit': '1000',
-        });
-        final response = await http.get(uri, headers: {
-          'Authorization': widget.authHeader,
-          'ngrok-skip-browser-warning': 'true',
-        });
-        if (response.statusCode != 200) continue;
-        final data = json.decode(response.body);
-        final eps = List<Map<String, dynamic>>.from(data['files']).where((f) => f['type'] != 'directory' && _isVideoName(f['name'].toString())).toList();
-        total += eps.length;
-        await _queueEpisodes(eps, season['name'].toString());
-      } catch (e) {}
+    final m = DownloadManager.instance;
+    await m.ensureInit();
+    m.configure(ip: widget.serverIp, port: widget.serverPort, authHeader: widget.authHeader);
+    final added = await m.enqueueWholeShow(showName: _showName, showPath: _showPath, category: _downloadCategory);
+    if (added < 0) {
+      _snack('Could not load the episode list');
+    } else if (added == 0) {
+      _snack('Everything is already downloaded or downloading');
+    } else {
+      _snack('Downloading $added more episode${added == 1 ? '' : 's'}');
     }
-    _snack(total > 0 ? 'Downloading $total episodes' : 'Could not find any episodes to download');
   }
 
   void _playEpisode(Map<String, dynamic> ep, int index, List<Map<String, dynamic>> allEpisodes) async {

@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
+import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
@@ -38,6 +40,10 @@ int episodeNumberOf(String name) {
 
 enum DlStatus { queued, downloading, paused, completed, failed }
 
+// ====================================================================
+// Models
+// ====================================================================
+
 class DownloadItem {
   final String id;
   final String type; // 'movie' | 'episode'
@@ -53,6 +59,8 @@ class DownloadItem {
   int received;
   int total;
   String? error;
+  bool userPaused;
+  bool autoRetry;
   String? videoFile;
   String? posterFile;
   String? bannerFile;
@@ -77,6 +85,8 @@ class DownloadItem {
     this.received = 0,
     this.total = 0,
     this.error,
+    this.userPaused = false,
+    this.autoRetry = true,
     this.videoFile,
     this.posterFile,
     this.bannerFile,
@@ -109,6 +119,8 @@ class DownloadItem {
         'received': received,
         'total': total,
         'error': error,
+        'userPaused': userPaused,
+        'autoRetry': autoRetry,
         'videoFile': videoFile,
         'posterFile': posterFile,
         'bannerFile': bannerFile,
@@ -135,6 +147,8 @@ class DownloadItem {
       received: (j['received'] ?? 0) as int,
       total: (j['total'] ?? 0) as int,
       error: j['error'],
+      userPaused: j['userPaused'] == true,
+      autoRetry: j['autoRetry'] != false,
       videoFile: j['videoFile'],
       posterFile: j['posterFile'],
       bannerFile: j['bannerFile'],
@@ -147,57 +161,134 @@ class DownloadItem {
   }
 }
 
+class CatalogEpisode {
+  final String id;
+  final String path;
+  final String name; // file name incl. extension
+  final String title;
+  final int episodeNo;
+  final int size;
+
+  CatalogEpisode({required this.id, required this.path, required this.name, required this.title, required this.episodeNo, this.size = 0});
+
+  Map<String, dynamic> toJson() => {'id': id, 'path': path, 'name': name, 'title': title, 'episodeNo': episodeNo, 'size': size};
+
+  factory CatalogEpisode.fromJson(Map<String, dynamic> j) => CatalogEpisode(
+        id: j['id'] ?? '',
+        path: j['path'] ?? '',
+        name: j['name'] ?? '',
+        title: j['title'] ?? '',
+        episodeNo: (j['episodeNo'] ?? 0) as int,
+        size: (j['size'] ?? 0) as int,
+      );
+
+  Map<String, dynamic> asServerMap() => {'name': name, 'path': path, 'size': size};
+}
+
+class CatalogSeason {
+  final String name;
+  final int seasonNo;
+  final List<CatalogEpisode> episodes;
+
+  CatalogSeason({required this.name, required this.seasonNo, required this.episodes});
+
+  Map<String, dynamic> toJson() => {'name': name, 'seasonNo': seasonNo, 'episodes': episodes.map((e) => e.toJson()).toList()};
+
+  factory CatalogSeason.fromJson(Map<String, dynamic> j) => CatalogSeason(
+        name: j['name'] ?? '',
+        seasonNo: (j['seasonNo'] ?? 0) as int,
+        episodes: (j['episodes'] as List? ?? const []).map((e) => CatalogEpisode.fromJson(Map<String, dynamic>.from(e))).toList(),
+      );
+}
+
 class DownloadShow {
   final String id;
   final String name;
   final String path;
+  String? category;
   String? posterFile;
   String? bannerFile;
   Map<String, dynamic>? metadata;
+  List<CatalogSeason> seasons;
+  bool thumbsDone;
 
   DownloadShow({
     required this.id,
     required this.name,
     required this.path,
+    this.category,
     this.posterFile,
     this.bannerFile,
     this.metadata,
-  });
+    List<CatalogSeason>? seasons,
+    this.thumbsDone = false,
+  }) : seasons = seasons ?? [];
 
   String get folder => 's_$id';
+  String thumbRel(String episodeId) => '$folder/thumbs/$episodeId.jpg';
+  int get episodeCount => seasons.fold(0, (a, s) => a + s.episodes.length);
 
   Map<String, dynamic> toJson() => {
         'id': id,
         'name': name,
         'path': path,
+        'category': category,
         'posterFile': posterFile,
         'bannerFile': bannerFile,
         'metadata': metadata,
+        'seasons': seasons.map((s) => s.toJson()).toList(),
+        'thumbsDone': thumbsDone,
       };
 
   factory DownloadShow.fromJson(Map<String, dynamic> j) => DownloadShow(
         id: j['id'] ?? '',
         name: j['name'] ?? '',
         path: j['path'] ?? '',
+        category: j['category'],
         posterFile: j['posterFile'],
         bannerFile: j['bannerFile'],
         metadata: j['metadata'] == null ? null : Map<String, dynamic>.from(j['metadata']),
+        seasons: (j['seasons'] as List? ?? const []).map((s) => CatalogSeason.fromJson(Map<String, dynamic>.from(s))).toList(),
+        thumbsDone: j['thumbsDone'] == true,
       );
 }
 
 class _Interrupted implements Exception {}
+
+class _Retryable implements Exception {
+  final String message;
+  _Retryable(this.message);
+}
+
+class _Fatal implements Exception {
+  final String message;
+  _Fatal(this.message);
+}
+
+class _Browse {
+  final List<Map<String, dynamic>> files;
+  final String category;
+  _Browse(this.files, this.category);
+}
+
+// ====================================================================
+// Manager
+// ====================================================================
 
 class DownloadManager extends ChangeNotifier {
   DownloadManager._();
   static final DownloadManager instance = DownloadManager._();
 
   static const List<String> _sceneTimes = ['00:10:00', '00:25:00', '00:45:00', '01:05:00', '01:25:00'];
+  static const List<String> _videoExts = ['.mp4', '.m4v', '.mov', '.mkv', '.avi', '.wmv', '.flv', '.webm', '.ts'];
 
   final Map<String, DownloadItem> _items = {};
   final Map<String, DownloadShow> _shows = {};
   final List<String> _queue = [];
   final Set<String> _pauseRequested = {};
   final Set<String> _removeRequested = {};
+  final Set<String> _catalogRunning = {};
+  final Set<String> _preparing = {};
 
   Directory? _root;
   Future<void>? _initFuture;
@@ -205,10 +296,13 @@ class DownloadManager extends ChangeNotifier {
   String _port = '8080';
   String _auth = '';
   bool _running = false;
+  bool _bgStarted = false;
   String? _activeId;
   http.Client? _activeClient;
   DateTime _lastNotify = DateTime.fromMillisecondsSinceEpoch(0);
   Timer? _saveTimer;
+  Timer? _retryTimer;
+  Future<void> _thumbChain = Future.value();
 
   // ---------------------------------------------------------------- setup
 
@@ -224,8 +318,8 @@ class DownloadManager extends ChangeNotifier {
     _port = prefs.getString('dl_server_port') ?? '8080';
     _auth = prefs.getString('dl_auth') ?? '';
     if (_auth.isEmpty) {
-      final u = prefs.getString('username') ?? '';
-      final pw = prefs.getString('password') ?? '';
+      final u = prefs.getString('username') ?? prefs.getString('pv_user') ?? '';
+      final pw = prefs.getString('password') ?? prefs.getString('pv_pass') ?? '';
       if (u.isNotEmpty && pw.isNotEmpty) {
         _auth = 'Basic ${base64Encode(utf8.encode('$u:$pw'))}';
       }
@@ -238,9 +332,8 @@ class DownloadManager extends ChangeNotifier {
         for (final raw in (data['items'] as List? ?? const [])) {
           final item = DownloadItem.fromJson(Map<String, dynamic>.from(raw));
           if (item.id.isEmpty) continue;
-          if (item.status == DlStatus.queued || item.status == DlStatus.downloading) {
-            item.status = DlStatus.paused;
-          }
+          // Anything that was running when the app closed simply continues later
+          if (item.status == DlStatus.downloading) item.status = DlStatus.queued;
           if (item.status != DlStatus.completed && item.videoFile != null) {
             final vf = File(absPath(item.videoFile!));
             if (await vf.exists()) item.received = await vf.length();
@@ -254,6 +347,51 @@ class DownloadManager extends ChangeNotifier {
       }
     } catch (_) {}
     notifyListeners();
+  }
+
+  /// Call once at app start. Resumes unfinished downloads and keeps retrying
+  /// failed ones in the background (also when the Downloads screen is closed).
+  void startBackground() {
+    if (_bgStarted) return;
+    _bgStarted = true;
+    ensureInit().then((_) {
+      for (final i in _items.values) {
+        if (i.status == DlStatus.queued && !_queue.contains(i.id)) _queue.add(i.id);
+      }
+      _pump();
+      _scheduleRetry(first: true);
+    });
+  }
+
+  void _scheduleRetry({bool first = false}) {
+    _retryTimer?.cancel();
+    final secs = first ? 8 : 25 + Random().nextInt(40);
+    _retryTimer = Timer(Duration(seconds: secs), () async {
+      try {
+        await _retryTick();
+      } catch (_) {}
+      _scheduleRetry();
+    });
+  }
+
+  Future<void> _retryTick() async {
+    final failed = _items.values.where((i) => i.status == DlStatus.failed && i.autoRetry && !i.userPaused).toList();
+    final needCatalog = _shows.values.where((s) => s.seasons.isEmpty || !s.thumbsDone || s.posterFile == null).toList();
+    if (failed.isEmpty && needCatalog.isEmpty) return;
+    if (!await _ensureServer()) return;
+
+    if (failed.isNotEmpty) {
+      for (final i in failed) {
+        i.status = DlStatus.queued;
+        i.error = null;
+        if (!_queue.contains(i.id)) _queue.add(i.id);
+      }
+      _notifyNow();
+      _pump();
+    }
+    for (final s in needCatalog) {
+      unawaited(_prepareShow(s.name, s.path, s.category));
+    }
   }
 
   void configure({required String ip, required String port, required String authHeader}) {
@@ -293,9 +431,25 @@ class DownloadManager extends ChangeNotifier {
   List<DownloadItem> get items => _items.values.toList();
   List<DownloadItem> get movies => _items.values.where((i) => i.isMovie).toList();
   Iterable<DownloadItem> itemsForShow(String showPath) => _items.values.where((i) => !i.isMovie && i.showPath == showPath);
-  Iterable<DownloadItem> itemsForSeason(String showPath, String season) =>
-      itemsForShow(showPath).where((i) => i.seasonName == season);
   DownloadShow? showFor(String showPath) => _shows[idFor(showPath)];
+
+  List<String> catalogIds(String showPath) {
+    final show = showFor(showPath);
+    if (show == null) return const [];
+    return show.seasons.expand((s) => s.episodes.map((e) => e.id)).toList();
+  }
+
+  /// Best available thumbnail for an episode item (catalog thumbnail first).
+  String? thumbOf(DownloadItem item) {
+    if (item.showPath != null) {
+      final show = showFor(item.showPath!);
+      if (show != null) {
+        final rel = show.thumbRel(item.id);
+        if (fileExists(rel)) return rel;
+      }
+    }
+    return item.thumbFile;
+  }
 
   List<String> get showPaths {
     final set = <String>{};
@@ -309,8 +463,14 @@ class DownloadManager extends ChangeNotifier {
 
   // ---------------------------------------------------------------- enqueue
 
+  String _videoExt(String serverPath) {
+    final e = p.extension(serverPath).toLowerCase();
+    return _videoExts.contains(e) ? e : '.mp4';
+  }
+
   Future<void> enqueueMovie({required Map<String, dynamic> movie, required String title}) async {
     await ensureInit();
+    startBackground();
     final serverPath = (movie['path'] ?? '').toString();
     if (serverPath.isEmpty) return;
     final id = idFor(serverPath);
@@ -319,7 +479,6 @@ class DownloadManager extends ChangeNotifier {
       if (existing.status != DlStatus.completed) resume(id);
       return;
     }
-    final ext = _videoExt(serverPath);
     final item = DownloadItem(
       id: id,
       type: 'movie',
@@ -328,7 +487,7 @@ class DownloadManager extends ChangeNotifier {
       fileName: p.basename(serverPath),
       total: movie['size'] is num ? (movie['size'] as num).toInt() : 0,
     );
-    item.videoFile = '${item.folder}/video$ext';
+    item.videoFile = '${item.folder}/video${_videoExt(serverPath)}';
     _items[id] = item;
     _queue.add(id);
     _saveIndexSoon();
@@ -336,15 +495,29 @@ class DownloadManager extends ChangeNotifier {
     _pump();
   }
 
+  /// Queues only the episodes that are not already downloaded/downloading.
+  /// Paused or failed ones are resumed instead of being duplicated.
   Future<int> enqueueEpisodes({
     required String showName,
     required String showPath,
     required String seasonName,
     required List<Map<String, dynamic>> episodes,
+    String? category,
   }) async {
     await ensureInit();
+    startBackground();
+    final sid = idFor(showPath);
+    final show = _shows.putIfAbsent(sid, () => DownloadShow(id: sid, name: showName, path: showPath, category: category));
+    if (show.category == null && category != null) show.category = category;
+
+    final sorted = List<Map<String, dynamic>>.from(episodes)
+      ..sort((a, b) {
+        final c = episodeNumberOf((a['name'] ?? '').toString()).compareTo(episodeNumberOf((b['name'] ?? '').toString()));
+        return c != 0 ? c : (a['name'] ?? '').toString().compareTo((b['name'] ?? '').toString());
+      });
+
     int added = 0;
-    for (final ep in episodes) {
+    for (final ep in sorted) {
       final serverPath = (ep['path'] ?? '').toString();
       if (serverPath.isEmpty) continue;
       final id = idFor(serverPath);
@@ -354,7 +527,6 @@ class DownloadManager extends ChangeNotifier {
         continue;
       }
       final name = (ep['name'] ?? p.basename(serverPath)).toString();
-      final ext = _videoExt(serverPath);
       final item = DownloadItem(
         id: id,
         type: 'episode',
@@ -368,23 +540,46 @@ class DownloadManager extends ChangeNotifier {
         episodeNo: episodeNumberOf(name),
         total: ep['size'] is num ? (ep['size'] as num).toInt() : 0,
       );
-      item.videoFile = '${item.folder}/video$ext';
+      item.videoFile = '${item.folder}/video${_videoExt(serverPath)}';
       _items[id] = item;
       _queue.add(id);
       added++;
     }
     _saveIndexSoon();
     _notifyNow();
-    unawaited(_ensureShowAssets(showName, showPath));
+    unawaited(_prepareShow(showName, showPath, category));
     _pump();
     return added;
   }
 
-  // Movie paths are usually folders (the server picks the video inside), so only trust real video extensions.
-  String _videoExt(String serverPath) {
-    final e = p.extension(serverPath).toLowerCase();
-    const known = ['.mp4', '.m4v', '.mov', '.mkv', '.avi', '.wmv', '.flv', '.webm', '.ts'];
-    return known.contains(e) ? e : '.mp4';
+  /// Queues every season of a show (using the saved/fetched episode catalog).
+  /// Returns -1 when the show's episode list could not be loaded.
+  Future<int> enqueueWholeShow({required String showName, required String showPath, String? category}) async {
+    await ensureInit();
+    startBackground();
+    final sid = idFor(showPath);
+    final show = _shows.putIfAbsent(sid, () => DownloadShow(id: sid, name: showName, path: showPath, category: category));
+    if (show.category == null && category != null) show.category = category;
+
+    if (show.seasons.isEmpty) {
+      if (!await _ensureServer()) return -1;
+      final seasons = await _fetchCatalog(show);
+      if (seasons == null || seasons.isEmpty) return -1;
+      show.seasons = seasons;
+      _saveIndexSoon();
+      _notifyNow();
+    }
+    int added = 0;
+    for (final season in show.seasons) {
+      added += await enqueueEpisodes(
+        showName: showName,
+        showPath: showPath,
+        seasonName: season.name,
+        episodes: season.episodes.map((e) => e.asServerMap()).toList(),
+        category: show.category,
+      );
+    }
+    return added;
   }
 
   // ---------------------------------------------------------------- controls
@@ -392,6 +587,7 @@ class DownloadManager extends ChangeNotifier {
   void pause(String id) {
     final item = _items[id];
     if (item == null) return;
+    item.userPaused = true;
     if (_activeId == id) {
       _pauseRequested.add(id);
       _activeClient?.close();
@@ -409,6 +605,8 @@ class DownloadManager extends ChangeNotifier {
     if (item.status == DlStatus.paused || item.status == DlStatus.failed) {
       item.status = DlStatus.queued;
       item.error = null;
+      item.userPaused = false;
+      item.autoRetry = true;
       if (!_queue.contains(id)) _queue.add(id);
       _saveIndexSoon();
       _notifyNow();
@@ -437,6 +635,10 @@ class DownloadManager extends ChangeNotifier {
     for (final id in ids) {
       await remove(id);
     }
+    final show = _shows.remove(idFor(showPath));
+    if (show != null) await _deleteFolder(show.folder);
+    await _saveIndex();
+    _notifyNow();
   }
 
   // ---------------------------------------------------------------- queue
@@ -449,41 +651,62 @@ class DownloadManager extends ChangeNotifier {
         final id = _queue.removeAt(0);
         final item = _items[id];
         if (item == null || item.status == DlStatus.completed) continue;
-        await _process(item);
+        final connectionLost = await _process(item);
+        if (connectionLost) {
+          // Don't waste time pinging for every remaining item: park them for the retry timer.
+          for (final rid in _queue) {
+            final r = _items[rid];
+            if (r != null && r.status == DlStatus.queued) {
+              r.status = DlStatus.failed;
+              r.error = 'Waiting for connection';
+              r.autoRetry = true;
+            }
+          }
+          _queue.clear();
+          _saveIndexSoon();
+          _notifyNow();
+          break;
+        }
       }
     } finally {
       _running = false;
     }
   }
 
-  Future<void> _process(DownloadItem item) async {
-    if (_ip.isEmpty || _auth.isEmpty) {
-      item.status = DlStatus.failed;
-      item.error = 'Not connected to a server';
-      _saveIndexSoon();
-      _notifyNow();
-      return;
-    }
-
+  /// Returns true when the item failed because the server could not be reached.
+  Future<bool> _process(DownloadItem item) async {
+    bool connectionLost = false;
     _activeId = item.id;
     item.status = DlStatus.downloading;
     item.error = null;
     _notifyNow();
 
     try {
+      if (!await _ensureServer()) throw _Retryable('Waiting for connection');
       await _fetchAssets(item);
       _throwIfInterrupted(item.id);
       await _downloadVideo(item);
       item.status = DlStatus.completed;
       item.error = null;
+      item.userPaused = false;
     } catch (e) {
       if (_removeRequested.contains(item.id)) {
         // cleaned up below
       } else if (_pauseRequested.contains(item.id)) {
         item.status = DlStatus.paused;
+      } else if (e is _Fatal) {
+        item.status = DlStatus.failed;
+        item.error = e.message;
+        item.autoRetry = false;
+      } else if (e is FileSystemException) {
+        item.status = DlStatus.failed;
+        item.error = 'Storage error (is the disk full?)';
+        item.autoRetry = false;
       } else {
         item.status = DlStatus.failed;
         item.error = _friendlyError(e);
+        item.autoRetry = true;
+        connectionLost = true;
       }
     } finally {
       _activeId = null;
@@ -495,9 +718,11 @@ class DownloadManager extends ChangeNotifier {
       _items.remove(item.id);
       await _deleteFolder(item.folder);
       await _cleanupShow(item.showPath);
+      connectionLost = false;
     }
     await _saveIndex();
     _notifyNow();
+    return connectionLost;
   }
 
   void _throwIfInterrupted(String id) {
@@ -505,9 +730,9 @@ class DownloadManager extends ChangeNotifier {
   }
 
   String _friendlyError(Object e) {
+    if (e is _Retryable) return e.message;
     if (e is TimeoutException) return 'Connection timed out';
     if (e is SocketException) return 'Cannot reach server';
-    if (e is FileSystemException) return 'Storage error (is the disk full?)';
     if (e is http.ClientException) return 'Connection lost';
     final s = e.toString().replaceFirst('Exception: ', '');
     return s.length > 80 ? s.substring(0, 80) : s;
@@ -518,8 +743,46 @@ class DownloadManager extends ChangeNotifier {
   String get _base => 'http://$_ip:$_port';
   String get _rawAuth => _auth.startsWith('Basic ') ? _auth.substring(6) : _auth;
   Map<String, String> get _headers => {'Authorization': _auth, 'ngrok-skip-browser-warning': 'true'};
-  Uri _api(String endpoint, Map<String, String> query) =>
-      Uri.parse('$_base/api/$endpoint').replace(queryParameters: query);
+  Uri _api(String endpoint, Map<String, String> query) => Uri.parse('$_base/api/$endpoint').replace(queryParameters: query);
+
+  Future<bool> _ping(String ip, String port) async {
+    if (ip.isEmpty) return false;
+    try {
+      final r = await http.get(Uri.parse('http://$ip:$port/api/test'), headers: _headers).timeout(const Duration(seconds: 3));
+      return r.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Makes sure we know a reachable server. Tries the saved address first,
+  /// then the addresses published in Firebase (same source the login uses).
+  Future<bool> _ensureServer() async {
+    if (_auth.isEmpty) return false;
+    if (await _ping(_ip, _port)) return true;
+    try {
+      final snap = await FirebaseDatabase.instance.ref().child('serverInfo').get().timeout(const Duration(seconds: 5));
+      if (snap.exists && snap.value is Map) {
+        final data = snap.value as Map;
+        final port = data['port']?.toString() ?? '8080';
+        final candidates = <String>[
+          if (data['privateIp'] != null) data['privateIp'].toString(),
+          if (data['ip'] != null) data['ip'].toString(),
+        ];
+        for (final c in candidates) {
+          if (await _ping(c, port)) {
+            _ip = c;
+            _port = port;
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.setString('dl_server_ip', c);
+            await prefs.setString('dl_server_port', port);
+            return true;
+          }
+        }
+      }
+    } catch (_) {}
+    return false;
+  }
 
   Future<bool> _saveFile(Uri uri, String rel, {int minBytes = 100, bool image = false}) async {
     try {
@@ -538,6 +801,20 @@ class DownloadManager extends ChangeNotifier {
     }
   }
 
+  /// Thumbnails are generated by ffmpeg on the server using Date.now() temp names,
+  /// so they must be requested strictly one at a time (across all downloads).
+  Future<bool> _saveThumb(Uri uri, String rel) {
+    final c = Completer<bool>();
+    _thumbChain = _thumbChain.then((_) async {
+      try {
+        c.complete(await _saveFile(uri, rel, image: true));
+      } catch (_) {
+        c.complete(false);
+      }
+    });
+    return c.future;
+  }
+
   Future<Map<String, dynamic>?> _getAssets(String serverPath) async {
     try {
       final r = await http.get(_api('movie-assets', {'path': serverPath}), headers: _headers).timeout(const Duration(seconds: 30));
@@ -554,11 +831,10 @@ class DownloadManager extends ChangeNotifier {
   Future<void> _fetchAssets(DownloadItem item) async {
     if (item.isMovie) {
       await _fetchMovieAssets(item);
-    } else {
-      if (item.thumbFile == null) {
-        final rel = '${item.folder}/thumb.jpg';
-        final ok = await _saveFile(_api('thumbnail', {'path': item.serverPath, 'auth': _rawAuth}), rel, image: true);
-        if (ok) item.thumbFile = rel;
+    } else if (item.thumbFile == null && item.showPath != null) {
+      final rel = 's_${idFor(item.showPath!)}/thumbs/${item.id}.jpg';
+      if (fileExists(rel) || await _saveThumb(_api('thumbnail', {'path': item.serverPath, 'auth': _rawAuth}), rel)) {
+        item.thumbFile = rel;
       }
     }
     _throwIfInterrupted(item.id);
@@ -595,16 +871,11 @@ class DownloadManager extends ChangeNotifier {
     _throwIfInterrupted(item.id);
 
     if (item.sceneFiles.isEmpty) {
-      // Sequential on purpose: the server names ffmpeg temp files by Date.now(), so parallel requests can collide.
       final found = <String>[];
       for (int i = 0; i < _sceneTimes.length; i++) {
         _throwIfInterrupted(item.id);
         final rel = '${item.folder}/scene_$i.jpg';
-        final ok = await _saveFile(
-          _api('thumbnail', {'path': item.serverPath, 'time': _sceneTimes[i], 'auth': _rawAuth}),
-          rel,
-          image: true,
-        );
+        final ok = await _saveThumb(_api('thumbnail', {'path': item.serverPath, 'time': _sceneTimes[i], 'auth': _rawAuth}), rel);
         if (ok) found.add(rel);
       }
       item.sceneFiles = found;
@@ -631,17 +902,30 @@ class DownloadManager extends ChangeNotifier {
     } catch (_) {}
   }
 
-  Future<void> _ensureShowAssets(String showName, String showPath) async {
-    if (_ip.isEmpty) return;
+  // ---------------------------------------------------------------- show catalog
+
+  Future<void> _prepareShow(String showName, String showPath, String? category) async {
     final sid = idFor(showPath);
-    final show = _shows.putIfAbsent(sid, () => DownloadShow(id: sid, name: showName, path: showPath));
+    final show = _shows.putIfAbsent(sid, () => DownloadShow(id: sid, name: showName, path: showPath, category: category));
+    if (show.category == null && category != null) show.category = category;
+    if (!_preparing.add(sid)) return;
+    try {
+      if (!await _ensureServer()) return;
+      await _ensureShowAssets(show);
+      await _buildCatalog(show);
+    } finally {
+      _preparing.remove(sid);
+    }
+  }
+
+  Future<void> _ensureShowAssets(DownloadShow show) async {
     try {
       if (show.posterFile == null) {
         final rel = '${show.folder}/poster.jpg';
-        if (await _saveFile(_api('poster', {'path': showPath}), rel, image: true)) show.posterFile = rel;
+        if (await _saveFile(_api('poster', {'path': show.path}), rel, image: true)) show.posterFile = rel;
       }
       if (show.metadata == null) {
-        final data = await _getAssets(showPath);
+        final data = await _getAssets(show.path);
         if (data != null) {
           final md = data['metadata'];
           if (md is Map) show.metadata = Map<String, dynamic>.from(md);
@@ -662,14 +946,121 @@ class DownloadManager extends ChangeNotifier {
     _notifyNow();
   }
 
+  Future<_Browse?> _browse(String relPath, String? preferred) async {
+    final tried = <String>{};
+    for (final c in [preferred, 'Hollywood', 'Bollywood']) {
+      if (c == null || !tried.add(c)) continue;
+      try {
+        final r = await http
+            .get(_api('browse', {'category': c, 'path': relPath, 'limit': '1000'}), headers: _headers)
+            .timeout(const Duration(seconds: 25));
+        if (r.statusCode != 200) continue;
+        final data = json.decode(r.body);
+        if (data is Map && data['success'] == true && data['files'] is List && (data['files'] as List).isNotEmpty) {
+          final files = (data['files'] as List).map((e) => Map<String, dynamic>.from(e)).toList();
+          return _Browse(files, c);
+        }
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  bool _isVideoName(String name) => _videoExts.contains(p.extension(name).toLowerCase());
+
+  List<CatalogEpisode> _episodesFrom(List<Map<String, dynamic>> files) {
+    final eps = files
+        .where((f) => f['type'] != 'directory' && _isVideoName((f['name'] ?? '').toString()))
+        .map((f) {
+          final name = f['name'].toString();
+          final path = f['path'].toString();
+          return CatalogEpisode(
+            id: idFor(path),
+            path: path,
+            name: name,
+            title: name.split('.').first,
+            episodeNo: episodeNumberOf(name),
+            size: f['size'] is num ? (f['size'] as num).toInt() : 0,
+          );
+        })
+        .toList();
+    eps.sort((a, b) {
+      final c = a.episodeNo.compareTo(b.episodeNo);
+      return c != 0 ? c : a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    });
+    return eps;
+  }
+
+  Future<List<CatalogSeason>?> _fetchCatalog(DownloadShow show) async {
+    final top = await _browse(show.path, show.category);
+    if (top == null) return null;
+    show.category = top.category;
+
+    final dirs = top.files.where((f) => f['type'] == 'directory').toList();
+    final seasons = <CatalogSeason>[];
+    if (dirs.isEmpty) {
+      final eps = _episodesFrom(top.files);
+      if (eps.isNotEmpty) seasons.add(CatalogSeason(name: 'Episodes', seasonNo: 0, episodes: eps));
+    } else {
+      for (final d in dirs) {
+        final sub = await _browse(d['path'].toString(), show.category);
+        if (sub == null) return null; // incomplete list: try again later instead of saving a partial catalog
+        final eps = _episodesFrom(sub.files);
+        if (eps.isEmpty) continue;
+        final name = d['name'].toString();
+        seasons.add(CatalogSeason(name: name, seasonNo: seasonNumberOf(name), episodes: eps));
+      }
+    }
+    seasons.sort((a, b) {
+      final c = a.seasonNo.compareTo(b.seasonNo);
+      return c != 0 ? c : a.name.compareTo(b.name);
+    });
+    return seasons;
+  }
+
+  /// Saves the whole episode menu (names + thumbnails) so it is browsable offline.
+  Future<void> _buildCatalog(DownloadShow show) async {
+    if (!_catalogRunning.add(show.id)) return;
+    try {
+      if (show.seasons.isEmpty) {
+        final s = await _fetchCatalog(show);
+        if (s == null || s.isEmpty) return;
+        show.seasons = s;
+        _saveIndexSoon();
+        _notifyNow();
+      }
+      if (show.thumbsDone) return;
+
+      int misses = 0;
+      bool all = true;
+      for (final season in show.seasons) {
+        for (final ep in season.episodes) {
+          if (!_shows.containsKey(show.id)) return; // show was removed meanwhile
+          final rel = show.thumbRel(ep.id);
+          if (fileExists(rel)) continue;
+          final ok = await _saveThumb(_api('thumbnail', {'path': ep.path, 'auth': _rawAuth}), rel);
+          if (ok) {
+            misses = 0;
+            _notifyThrottled();
+          } else {
+            all = false;
+            if (++misses >= 3) return;
+          }
+        }
+      }
+      show.thumbsDone = all;
+    } finally {
+      _catalogRunning.remove(show.id);
+      _saveIndexSoon();
+      _notifyNow();
+    }
+  }
+
+  // ---------------------------------------------------------------- video
+
   Future<void> _downloadVideo(DownloadItem item) async {
     final file = File(absPath(item.videoFile!));
     await file.parent.create(recursive: true);
     int existing = await file.exists() ? await file.length() : 0;
-    if (item.total > 0 && existing >= item.total && item.status != DlStatus.failed) {
-      item.received = existing;
-      return;
-    }
 
     final client = http.Client();
     _activeClient = client;
@@ -687,9 +1078,8 @@ class DownloadManager extends ChangeNotifier {
         if (item.total <= 0) item.total = existing;
         return;
       }
-      if (resp.statusCode != 200 && resp.statusCode != 206) {
-        throw Exception('Server returned ${resp.statusCode}');
-      }
+      if (resp.statusCode >= 400 && resp.statusCode < 500) throw _Fatal('Server returned ${resp.statusCode}');
+      if (resp.statusCode != 200 && resp.statusCode != 206) throw _Retryable('Server returned ${resp.statusCode}');
 
       bool append = false;
       int? headerTotal;
@@ -726,7 +1116,7 @@ class DownloadManager extends ChangeNotifier {
       sink = null;
 
       if (headerTotal != null && headerTotal > 0 && item.received < headerTotal) {
-        throw Exception('Connection lost');
+        throw _Retryable('Connection lost');
       }
       item.total = item.received;
     } finally {
@@ -750,8 +1140,7 @@ class DownloadManager extends ChangeNotifier {
   Future<void> _cleanupShow(String? showPath) async {
     if (showPath == null) return;
     if (itemsForShow(showPath).isNotEmpty) return;
-    final sid = idFor(showPath);
-    final show = _shows.remove(sid);
+    final show = _shows.remove(idFor(showPath));
     if (show != null) await _deleteFolder(show.folder);
   }
 
@@ -929,18 +1318,22 @@ class _DownloadButtonState extends State<DownloadButton> {
   }
 }
 
+/// Download button for a group of episodes (a season or a whole show).
+///
+/// It stays a plain download icon until EVERY episode of the group has been
+/// queued/downloaded. Only then it turns into a progress ring that fills
+/// across the whole group (a finished episode counts as 1/N). When every
+/// episode is finished it shows a "done" icon.
 class DownloadGroupButton extends StatefulWidget {
-  final Iterable<DownloadItem> Function(DownloadManager m) selector;
-  final int? expected;
+  final List<String> Function(DownloadManager m) idsSelector;
   final Future<void> Function() onDownload;
   final String tooltip;
   final double size;
 
   const DownloadGroupButton({
     Key? key,
-    required this.selector,
+    required this.idsSelector,
     required this.onDownload,
-    this.expected,
     this.tooltip = 'Download',
     this.size = 28,
   }) : super(key: key);
@@ -975,23 +1368,32 @@ class _DownloadGroupButtonState extends State<DownloadGroupButton> {
 
   @override
   Widget build(BuildContext context) {
-    final list = widget.selector(_m).toList();
-    final active = list.any((i) => i.isActive);
-    final completed = list.where((i) => i.status == DlStatus.completed).length;
-    final done = widget.expected != null && widget.expected! > 0 && completed >= widget.expected!;
+    final ids = widget.idsSelector(_m);
+    final n = ids.length;
+    final items = ids.map(_m.itemFor).toList();
+    final accounted = n > 0 && items.every((i) => i != null);
+    final completed = accounted ? items.where((i) => i!.status == DlStatus.completed).length : 0;
+    final active = accounted && items.any((i) => i!.isActive);
+    final done = accounted && completed == n;
     final s = widget.size;
 
     Widget icon;
     if (done) {
       icon = Icon(Icons.download_done_rounded, color: const Color(0xFFB19CD9), size: s);
     } else if (active) {
-      final rec = list.fold<int>(0, (a, b) => a + b.received);
-      final tot = list.fold<int>(0, (a, b) => a + b.total);
+      double sum = 0;
+      for (final i in items) {
+        if (i!.status == DlStatus.completed) {
+          sum += 1;
+        } else if (i.total > 0) {
+          sum += i.progress;
+        }
+      }
       icon = SizedBox(
         width: s - 4,
         height: s - 4,
         child: CircularProgressIndicator(
-          value: tot > 0 ? (rec / tot).clamp(0.0, 1.0) : null,
+          value: (sum / n).clamp(0.0, 1.0),
           strokeWidth: 2.5,
           color: const Color(0xFF8A2BE2),
           backgroundColor: Colors.white24,
